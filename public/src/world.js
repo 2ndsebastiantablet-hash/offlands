@@ -4,6 +4,8 @@ import { choose, maybe, randRange, seeded, valueNoise } from "./random.js";
 
 export const CHUNK_SIZE = 640;
 export const VIEW_RADIUS = 2;
+export const WORLD_CHUNKS_WIDE = 12;
+export const WORLD_CHUNKS_TALL = 12;
 
 const CATEGORY_ORDER = [
   "terrainBase",
@@ -19,10 +21,25 @@ const CATEGORY_ORDER = [
 const PROP_ROTATION = new Set(["rock", "crackedRock", "snowRock", "ashPile", "lavaCrack"]);
 
 export class World {
-  constructor(seed = "offlands-001") {
+  constructor(seed = "offlands-001", widthChunks = WORLD_CHUNKS_WIDE, heightChunks = WORLD_CHUNKS_TALL) {
     this.seed = seed;
+    this.widthChunks = widthChunks;
+    this.heightChunks = heightChunks;
+    this.minChunkX = -Math.floor(widthChunks / 2);
+    this.minChunkY = -Math.floor(heightChunks / 2);
+    this.maxChunkX = this.minChunkX + widthChunks - 1;
+    this.maxChunkY = this.minChunkY + heightChunks - 1;
+    this.bounds = {
+      minX: this.minChunkX * CHUNK_SIZE,
+      minY: this.minChunkY * CHUNK_SIZE,
+      maxX: (this.maxChunkX + 1) * CHUNK_SIZE,
+      maxY: (this.maxChunkY + 1) * CHUNK_SIZE,
+      width: widthChunks * CHUNK_SIZE,
+      height: heightChunks * CHUNK_SIZE
+    };
     this.chunks = new Map();
     this.biomeProfiles = new Map();
+    this.generateWorld();
   }
 
   key(cx, cy) {
@@ -36,16 +53,46 @@ export class World {
     };
   }
 
-  getChunk(cx, cy) {
-    const key = this.key(cx, cy);
-    if (!this.chunks.has(key)) {
-      this.chunks.set(key, this.generateChunk(cx, cy));
+  isChunkInside(cx, cy) {
+    return cx >= this.minChunkX && cx <= this.maxChunkX && cy >= this.minChunkY && cy <= this.maxChunkY;
+  }
+
+  clampChunkCoords(cx, cy) {
+    return {
+      cx: clamp(cx, this.minChunkX, this.maxChunkX),
+      cy: clamp(cy, this.minChunkY, this.maxChunkY)
+    };
+  }
+
+  clampPosition(x, y, padding = 0) {
+    return {
+      x: clamp(x, this.bounds.minX + padding, this.bounds.maxX - padding),
+      y: clamp(y, this.bounds.minY + padding, this.bounds.maxY - padding)
+    };
+  }
+
+  generateWorld() {
+    for (let cy = this.minChunkY; cy <= this.maxChunkY; cy += 1) {
+      for (let cx = this.minChunkX; cx <= this.maxChunkX; cx += 1) {
+        const key = this.key(cx, cy);
+        this.chunks.set(key, this.generateChunk(cx, cy));
+      }
     }
+  }
+
+  allChunks() {
+    return [...this.chunks.values()];
+  }
+
+  getChunk(cx, cy) {
+    const clamped = this.clampChunkCoords(cx, cy);
+    const key = this.key(clamped.cx, clamped.cy);
     return this.chunks.get(key);
   }
 
   getBiomeAt(x, y) {
-    const { cx, cy } = this.chunkCoords(x, y);
+    const pos = this.clampPosition(x, y, 1);
+    const { cx, cy } = this.chunkCoords(pos.x, pos.y);
     return this.getChunk(cx, cy).biomeProfile;
   }
 
@@ -54,13 +101,18 @@ export class World {
     const chunks = [];
     for (let yOff = -radius; yOff <= radius; yOff += 1) {
       for (let xOff = -radius; xOff <= radius; xOff += 1) {
-        chunks.push(this.getChunk(cx + xOff, cy + yOff));
+        const nextCx = cx + xOff;
+        const nextCy = cy + yOff;
+        if (this.isChunkInside(nextCx, nextCy)) chunks.push(this.getChunk(nextCx, nextCy));
       }
     }
     return chunks;
   }
 
   getBiomeProfile(cx, cy) {
+    const clamped = this.clampChunkCoords(cx, cy);
+    cx = clamped.cx;
+    cy = clamped.cy;
     const key = this.key(cx, cy);
     if (!this.biomeProfiles.has(key)) {
       this.biomeProfiles.set(key, this.generateBiomeProfile(cx, cy));
@@ -109,13 +161,15 @@ export class World {
     }
 
     if (maybe(rng, biomeProfile.chestChance)) {
+      const chestId = `${cx}:${cy}:chest:0`;
       chests.push({
-        id: `${cx}:${cy}:chest:0`,
+        id: chestId,
         biomeId,
         biomeName: biomeProfile.name,
         x: originX + randRange(rng, 82, CHUNK_SIZE - 82),
         y: originY + randRange(rng, 82, CHUNK_SIZE - 82),
-        opened: false
+        opened: false,
+        loot: createChestLoot(this.seed, chestId, biomeProfile)
       });
     }
 
@@ -124,19 +178,32 @@ export class World {
     for (let index = 0; index < creatureCount; index += 1) {
       let creatureX = originX + randRange(rng, 70, CHUNK_SIZE - 70);
       let creatureY = originY + randRange(rng, 70, CHUNK_SIZE - 70);
-      if (cx === 0 && cy === 0 && Math.hypot(creatureX - 320, creatureY - 320) < 230) {
+      const isFirstDiscoveryCreature = cx === 0 && cy === 0 && index === 0;
+      if (isFirstDiscoveryCreature) {
+        creatureX = originX + 430;
+        creatureY = originY + 360;
+      } else if (cx === 0 && cy === 0 && Math.hypot(creatureX - 320, creatureY - 320) < 230) {
         creatureX = originX + CHUNK_SIZE - 95;
         creatureY = originY + CHUNK_SIZE - 95;
       }
-      creatures.push(
-        generateCreatureSpec(
-          rng,
-          biomeProfile,
-          `${cx}:${cy}:creature:${index}`,
-          creatureX,
-          creatureY
-        )
+      const creature = generateCreatureSpec(
+        rng,
+        biomeProfile,
+        `${cx}:${cy}:creature:${index}`,
+        creatureX,
+        creatureY
       );
+      if (isFirstDiscoveryCreature) {
+        creature.profile.isFriendly = true;
+        creature.profile.behaviorType = "neutral";
+        creature.profile.temperament = "Curious";
+        creature.profile.canLeaveOriginBiome = false;
+        creature.profile.prefersOriginBiome = true;
+        creature.damage = Math.max(1, Math.round(creature.damage * 0.45));
+        creature.detection *= 0.55;
+        creature.chaseRange *= 0.45;
+      }
+      creatures.push(creature);
     }
 
     let hazardIndex = 0;
@@ -354,6 +421,30 @@ function clamp(value, min, max) {
 
 function allowsPropRotation(type) {
   return PROP_ROTATION.has(type);
+}
+
+function createChestLoot(seed, chestId, biome) {
+  const rng = seeded(`${seed}:loot:${chestId}`);
+  const resources = {};
+  const rolls = 2 + Math.floor(rng() * 3);
+  for (let index = 0; index < rolls; index += 1) {
+    const resource = choose(rng, biome.lootResources);
+    resources[resource] = (resources[resource] || 0) + 1 + Math.floor(rng() * 3);
+  }
+  const weaponId = rng() < 0.42 ? choose(rng, biome.lootWeapons) : null;
+  const xp = 10 + Math.floor(rng() * 16);
+  const summary = [
+    ...Object.entries(resources).map(([name, amount]) => `${amount} ${name}`),
+    weaponId ? labelize(weaponId) : null,
+    `${xp} XP`
+  ].filter(Boolean).join(", ");
+  return { resources, weaponId, xp, summary };
+}
+
+function labelize(value) {
+  return String(value || "")
+    .replace(/([A-Z])/g, " $1")
+    .replace(/^./, (letter) => letter.toUpperCase());
 }
 
 function createHazard(type, id, originX, originY, rng) {

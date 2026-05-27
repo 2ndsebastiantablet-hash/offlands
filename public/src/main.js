@@ -1,6 +1,6 @@
 import { ITEM_DEFS, RECIPES, RESOURCE_COLORS, RESOURCES, WEAPONS } from "./data.js";
 import { drawCreature } from "./creatures.js";
-import { CHUNK_SIZE, World } from "./world.js";
+import { CHUNK_SIZE, WORLD_CHUNKS_TALL, WORLD_CHUNKS_WIDE, World } from "./world.js";
 import { MultiplayerClient } from "../frontend/multiplayer-client.js";
 import { clamp, distance, normalize, seeded } from "./random.js";
 
@@ -9,6 +9,20 @@ const ctx = canvas.getContext("2d");
 const shell = document.getElementById("game-shell");
 const mainMenu = document.getElementById("mainMenu");
 const playButton = document.getElementById("playButton");
+const menuViews = [...document.querySelectorAll(".menu-view")];
+const singlePlayerButton = document.getElementById("singlePlayerButton");
+const multiplayerButton = document.getElementById("multiplayerButton");
+const modeBackButton = document.getElementById("modeBackButton");
+const multiplayerBackButton = document.getElementById("multiplayerBackButton");
+const refreshLobbiesButton = document.getElementById("refreshLobbiesButton");
+const openCreateServerButton = document.getElementById("openCreateServerButton");
+const createBackButton = document.getElementById("createBackButton");
+const createServerButton = document.getElementById("createServerButton");
+const serverPublicToggle = document.getElementById("serverPublicToggle");
+const serverPrivateToggle = document.getElementById("serverPrivateToggle");
+const serverNameInput = document.getElementById("serverNameInput");
+const privateCodeInput = document.getElementById("privateCodeInput");
+const lobbyList = document.getElementById("lobbyList");
 const healthText = document.getElementById("healthText");
 const levelText = document.getElementById("levelText");
 const weaponText = document.getElementById("weaponText");
@@ -22,12 +36,19 @@ const inventoryPanel = document.getElementById("inventoryPanel");
 const inventoryGrid = document.getElementById("inventoryGrid");
 const inventoryHotbar = document.getElementById("inventoryHotbar");
 const inventoryDetails = document.getElementById("inventoryDetails");
+const creatureInfoPanel = document.getElementById("creatureInfoPanel");
+const creatureInfoContent = document.getElementById("creatureInfoContent");
+const closeCreatureInfoButton = document.getElementById("closeCreatureInfoButton");
+const creatureCodexPanel = document.getElementById("creatureCodexPanel");
+const creatureCodexList = document.getElementById("creatureCodexList");
+const creatureCodexDetail = document.getElementById("creatureCodexDetail");
+const closeCodexButton = document.getElementById("closeCodexButton");
 const multiplayerStatus = document.getElementById("multiplayerStatus");
 const nameInput = document.getElementById("nameInput");
 const codeInput = document.getElementById("codeInput");
 
 const ENABLE_NOSTALGIC_FILTER = true;
-const DEBUG_OVERLAY = true;
+const DEBUG_OVERLAY = false;
 const STORAGE_NAME = "offlands_player_name";
 const DEFAULT_SEED = new URLSearchParams(location.search).get("seed") || "offlands-shared-seed-001";
 const apiBase = location.protocol === "file:" ? "http://127.0.0.1:3000" : location.origin;
@@ -36,7 +57,6 @@ const input = {
   keys: new Set(),
   mouse: { x: 0, y: 0, worldX: 0, worldY: 0, down: false },
   attackQueued: false,
-  interactQueued: false,
   pickupQueued: false
 };
 
@@ -64,6 +84,11 @@ const state = {
   attackSeq: 0,
   dropSeq: 0,
   inventoryOpen: false,
+  codexOpen: false,
+  selectedCreatureId: null,
+  creatureCodex: new Map(),
+  serverPrivacy: "public",
+  publicLobbies: [],
   lastStatePush: 0,
   statusTimer: 0,
   player: {
@@ -124,24 +149,68 @@ function screenToWorld(x, y) {
 
 function setStatus(message, seconds = 3) {
   statusText.textContent = message;
+  statusText.classList.toggle("hidden", !message);
   state.statusTimer = seconds;
 }
 
-function startGame() {
+function showMenuScreen(screenId) {
+  menuViews.forEach((view) => view.classList.toggle("hidden", view.id !== screenId));
+}
+
+function setServerPrivacy(privacy) {
+  state.serverPrivacy = privacy;
+  const isPrivate = privacy === "private";
+  serverPublicToggle.classList.toggle("selected", !isPrivate);
+  serverPrivateToggle.classList.toggle("selected", isPrivate);
+  privateCodeInput.classList.toggle("hidden", !isPrivate);
+  createServerButton.textContent = isPrivate ? "Create Private" : "Create Public";
+}
+
+function prepareNewWorld(seed = state.worldSeed) {
+  state.worldSeed = seed;
+  state.world = new World(seed);
+  state.openedChests.clear();
+  state.deadCreatures.clear();
+  state.projectiles.length = 0;
+  state.enemyProjectiles.length = 0;
+  state.effects.length = 0;
+  state.floatingText.length = 0;
+  state.droppedItems.length = 0;
+  state.markers.length = 0;
+  state.creatureCodex.clear();
+  state.selectedCreatureId = null;
+  state.player.x = 320;
+  state.player.y = 320;
+  state.player.vx = 0;
+  state.player.vy = 0;
+  state.player.hp = state.player.maxHp;
+  updateCamera(1);
+}
+
+async function startSoloGame() {
+  if (state.connected) await leaveMultiplayer();
+  prepareNewWorld(DEFAULT_SEED);
+  startGame("Solo expedition started. The full world is ready.");
+}
+
+function startGame(message = null) {
   savePlayerName();
   state.started = true;
   mainMenu.classList.add("hidden");
   shell.classList.remove("game-not-started");
-  setStatus(state.connected ? "Multiplayer active. Explore together." : "Solo expedition started.");
+  setStatus(message || (state.connected ? "Multiplayer active. Explore together." : "Solo expedition started."));
 }
 
 function returnToMenu() {
   state.started = false;
   input.mouse.down = false;
   setInventoryOpen(false);
+  setCodexOpen(false);
+  closeCreatureInfo();
   mainMenu.classList.remove("hidden");
   craftingPanel.classList.add("hidden");
   shell.classList.add("game-not-started");
+  showMenuScreen("menuTitleScreen");
   updateMultiplayerStatus();
 }
 
@@ -165,9 +234,8 @@ function currentBiome() {
 
 function switchWorldSeed(seed) {
   if (!seed || seed === state.worldSeed) return;
-  state.worldSeed = seed;
-  state.world = new World(seed);
-  setStatus(`Joined shared world seed ${seed.slice(0, 18)}.`);
+  prepareNewWorld(seed);
+  setStatus(`Pregenerated shared world seed ${seed.slice(0, 18)}.`);
 }
 
 function playerStatePayload() {
@@ -201,8 +269,8 @@ function ensureMultiplayer() {
     onSnapshot(snapshot) {
       state.snapshot = snapshot;
       state.connected = true;
-      ingestWorldState(snapshot.worldState);
       adoptSnapshotSeed(snapshot);
+      ingestWorldState(snapshot.worldState);
       updateRemotePlayers(snapshot);
       updateMultiplayerStatus();
     },
@@ -247,57 +315,89 @@ function updateRemotePlayers(snapshot) {
 function updateMultiplayerStatus(extra = null) {
   const snapshot = state.snapshot;
   if (!snapshot) {
-    multiplayerStatus.textContent = extra || "Solo mode ready. Join a lobby before Play for multiplayer.";
+    multiplayerStatus.textContent = extra || "Choose a public server, create one, or join a private code.";
     return;
   }
   const code = snapshot.code ? ` | code ${snapshot.code}` : "";
   multiplayerStatus.textContent = extra || `${snapshot.name}${code} | ${snapshot.playerCount}/${snapshot.maxPlayers} players`;
 }
 
-async function joinPublic() {
+async function refreshPublicLobbies() {
   try {
     savePlayerName();
     const client = ensureMultiplayer();
-    updateMultiplayerStatus("Finding public Offlands lobby...");
-    const lobbies = await client.listPublicLobbies();
-    const lobby = lobbies.find((entry) => entry.name.includes("Offlands") && entry.playerCount < entry.maxPlayers);
-    const options = {
-      playerName: state.playerName,
-      playerState: playerStatePayload(),
-      playerMeta: playerMetaPayload(),
-      maxPlayers: 12
-    };
-    if (lobby) {
-      await client.joinLobbyById({ ...options, lobbyId: lobby.lobbyId });
-      setStatus("Joined public multiplayer.");
-    } else {
-      await client.createLobby({
-        ...options,
-        lobbyName: "Offlands Public",
-        privateLobby: false
-      });
-      setStatus("Created public multiplayer world.");
-    }
+    updateMultiplayerStatus("Refreshing public servers...");
+    state.publicLobbies = await client.listPublicLobbies();
+    renderLobbyList();
+    updateMultiplayerStatus(state.publicLobbies.length ? "Public servers loaded." : "No public servers yet. Create one.");
   } catch (error) {
-    updateMultiplayerStatus(error.message || "Could not join public lobby.");
+    updateMultiplayerStatus(error.message || "Could not refresh public servers.");
   }
 }
 
-async function createPrivate() {
+function renderLobbyList() {
+  if (!lobbyList) return;
+  lobbyList.innerHTML = "";
+  if (!state.publicLobbies.length) {
+    const empty = document.createElement("div");
+    empty.className = "tiny";
+    empty.textContent = "No public servers found.";
+    lobbyList.append(empty);
+    return;
+  }
+  for (const lobby of state.publicLobbies) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "lobby-row";
+    row.innerHTML = `
+      <span>
+        <span class="lobby-name">${escapeHtml(lobby.name || "Offlands Server")}</span><br>
+        <span class="tiny">${escapeHtml(lobby.hostName || "Unknown host")}</span>
+      </span>
+      <span>${lobby.playerCount}/${lobby.maxPlayers}</span>
+    `;
+    row.addEventListener("click", () => joinPublicLobby(lobby.lobbyId));
+    lobbyList.append(row);
+  }
+}
+
+async function joinPublicLobby(lobbyId) {
   try {
     savePlayerName();
     const client = ensureMultiplayer();
+    await client.joinLobbyById({
+      lobbyId,
+      playerName: state.playerName,
+      playerState: playerStatePayload(),
+      playerMeta: playerMetaPayload()
+    });
+    updateMultiplayerStatus("Joined server. Press Play to enter.");
+    startGame("Multiplayer active. Shared finite world loaded.");
+  } catch (error) {
+    updateMultiplayerStatus(error.message || "Could not join server.");
+  }
+}
+
+async function createServer() {
+  try {
+    savePlayerName();
+    const client = ensureMultiplayer();
+    const privateLobby = state.serverPrivacy === "private";
+    const lobbyName = serverNameInput.value.trim() || "Offlands Server";
+    const code = privateCodeInput.value.trim().toUpperCase();
     await client.createLobby({
-      lobbyName: "Offlands Private",
-      privateLobby: true,
+      lobbyName,
+      privateLobby,
+      code: privateLobby ? code : null,
       maxPlayers: 12,
       playerName: state.playerName,
       playerState: playerStatePayload(),
       playerMeta: playerMetaPayload()
     });
-    setStatus("Private lobby created. Share the code.");
+    updateMultiplayerStatus(`${privateLobby ? "Private" : "Public"} server created. Press Play to enter.`);
+    startGame("Multiplayer active. Shared finite world loaded.");
   } catch (error) {
-    updateMultiplayerStatus(error.message || "Could not create private lobby.");
+    updateMultiplayerStatus(error.message || "Could not create server.");
   }
 }
 
@@ -316,7 +416,8 @@ async function joinCode() {
       playerState: playerStatePayload(),
       playerMeta: playerMetaPayload()
     });
-    setStatus("Joined private multiplayer.");
+    updateMultiplayerStatus("Joined private server. Press Play to enter.");
+    startGame("Multiplayer active. Shared finite world loaded.");
   } catch (error) {
     updateMultiplayerStatus(error.message || "Could not join code.");
   }
@@ -361,7 +462,7 @@ function update(dt, now) {
 
   if (state.statusTimer > 0) {
     state.statusTimer -= dt;
-    if (state.statusTimer <= 0) statusText.textContent = "Explore, fight, loot, craft, and level up.";
+    if (state.statusTimer <= 0) setStatus("", 0);
   }
 
   input.mouse.worldX = screenToWorld(input.mouse.x, input.mouse.y).x;
@@ -373,12 +474,12 @@ function update(dt, now) {
   } else {
     movePlayer(dt);
     updateHazardEffects(dt);
-    const clickedPickup = input.pickupQueued && pickupDroppedAt(input.mouse.worldX, input.mouse.worldY);
-    if (!clickedPickup && (input.attackQueued || input.mouse.down)) useSelectedItem(now);
-    if (input.interactQueued) interact();
+    clampPlayerToWorld();
+    const handledClick = input.pickupQueued && handleWorldClick(input.mouse.worldX, input.mouse.worldY);
+    if (handledClick) input.mouse.down = false;
+    if (!handledClick && (input.attackQueued || input.mouse.down)) useSelectedItem(now);
   }
   input.attackQueued = false;
-  input.interactQueued = false;
   input.pickupQueued = false;
 
   player.cooldown = Math.max(0, player.cooldown - dt * 1000);
@@ -437,6 +538,18 @@ function movePlayer(dt) {
   if (windPush > 0) {
     player.x += biome.wind.x * windPush * 0.38 * dt;
     player.y += biome.wind.y * windPush * 0.38 * dt;
+  }
+  clampPlayerToWorld();
+}
+
+function clampPlayerToWorld() {
+  const beforeX = state.player.x;
+  const beforeY = state.player.y;
+  const clamped = state.world.clampPosition(beforeX, beforeY, state.player.radius + 8);
+  state.player.x = clamped.x;
+  state.player.y = clamped.y;
+  if ((beforeX !== clamped.x || beforeY !== clamped.y) && state.statusTimer <= 0) {
+    setStatus("The Offlands end here.", 1.4);
   }
 }
 
@@ -595,11 +708,21 @@ function killCreature(creature) {
   state.deadCreatures.add(creature.id);
   const rng = seeded(`${state.worldSeed}:drop:${creature.id}`);
   const lootTable = creature.profile?.lootTable;
-  const resources = lootTable?.resources?.length ? lootTable.resources : state.world.getBiomeAt(creature.x, creature.y).resources;
-  const resource = resources[Math.floor(rng() * resources.length)];
-  const min = lootTable?.min || 1;
-  const max = lootTable?.max || 2;
-  spawnDroppedItem(resource, min + Math.floor(rng() * Math.max(1, max - min + 1)), creature.x, creature.y);
+  let dropped = false;
+  for (const drop of lootTable?.drops || []) {
+    if (rng() > (drop.chance ?? 0.35)) continue;
+    const min = drop.min || 1;
+    const max = drop.max || min;
+    spawnDroppedItem(drop.itemId, min + Math.floor(rng() * Math.max(1, max - min + 1)), creature.x + randDropOffset(rng), creature.y + randDropOffset(rng));
+    dropped = true;
+  }
+  if (!dropped) {
+    const resources = lootTable?.resources?.length ? lootTable.resources : state.world.getBiomeAt(creature.x, creature.y).resources;
+    const resource = resources[Math.floor(rng() * resources.length)];
+    const min = lootTable?.min || 1;
+    const max = lootTable?.max || 2;
+    spawnDroppedItem(resource, min + Math.floor(rng() * Math.max(1, max - min + 1)), creature.x, creature.y);
+  }
   if (lootTable?.rareWeaponChance && rng() < lootTable.rareWeaponChance) {
     const weaponId = creature.profile?.bodyType === "crystal" ? "eyeWand" : creature.profile?.bodyType === "boneBeast" ? "boneClub" : "stickSword";
     spawnDroppedItem(weaponId, 1, creature.x + 18, creature.y + 10);
@@ -607,6 +730,10 @@ function killCreature(creature) {
   gainXp(creature.xp);
   addFloatingText(`+${creature.xp} XP`, creature.x, creature.y - 42, "#a7ff8b");
   sendWorldEvent("creature_killed", { creatureId: creature.id });
+}
+
+function randDropOffset(rng) {
+  return -16 + rng() * 32;
 }
 
 function nearbyCreatures() {
@@ -748,6 +875,9 @@ function clampCreatureMovement(creature, chunk) {
     creature.x = clamp(creature.x, chunk.x + 28, chunk.x + CHUNK_SIZE - 28);
     creature.y = clamp(creature.y, chunk.y + 28, chunk.y + CHUNK_SIZE - 28);
   }
+  const worldClamped = state.world.clampPosition(creature.x, creature.y, creature.bodyRadius || 24);
+  creature.x = worldClamped.x;
+  creature.y = worldClamped.y;
 }
 
 function isCreatureHostile(creature, playerDist = Infinity) {
@@ -945,6 +1075,47 @@ function interact() {
   setStatus("Nothing close enough to interact with.", 1.4);
 }
 
+function handleWorldClick(x, y) {
+  if (pickupDroppedAt(x, y)) return true;
+  const creature = creatureAtPoint(x, y);
+  if (creature && distance(creature, state.player) <= Math.max(130, creature.bodyRadius + 82)) {
+    openCreatureInfo(creature);
+    return true;
+  }
+  for (const chunk of state.world.nearbyChunks(state.player.x, state.player.y, 1)) {
+    for (const resource of chunk.resources) {
+      if (resource.collected || distance(resource, state.player) > 70) continue;
+      if (Math.hypot(resource.x - x, resource.y - y) > 18) continue;
+      resource.collected = true;
+      addResource(resource.type, resource.amount);
+      addFloatingText(`+${resource.amount} ${resource.type}`, resource.x, resource.y - 20, "#def7c4");
+      return true;
+    }
+    for (const chest of chunk.chests) {
+      if (state.openedChests.has(chest.id) || distance(chest, state.player) > 72) continue;
+      if (Math.abs(chest.x - x) > 28 || Math.abs(chest.y - y) > 24) continue;
+      openChest(chest);
+      return true;
+    }
+  }
+  return false;
+}
+
+function creatureAtPoint(x, y) {
+  let nearest = null;
+  let nearestDistance = Infinity;
+  for (const creature of nearbyCreatures()) {
+    if (creature.dead || state.deadCreatures.has(creature.id)) continue;
+    const hitRadius = (creature.bodyRadius || 22) + 12;
+    const dist = Math.hypot(creature.x - x, creature.y - y);
+    if (dist <= hitRadius && dist < nearestDistance) {
+      nearest = creature;
+      nearestDistance = dist;
+    }
+  }
+  return nearest;
+}
+
 function tryTameCreature() {
   let nearest = null;
   let nearestDistance = Infinity;
@@ -989,9 +1160,147 @@ function tryTameCreature() {
   return true;
 }
 
+function openCreatureInfo(creature) {
+  identifyCreature(creature);
+  state.selectedCreatureId = creature.id;
+  creatureInfoPanel.classList.remove("hidden");
+  renderCreatureInfoPanel(creature);
+  setStatus(`${creature.profile?.name || creature.name} identified.`, 1.4);
+}
+
+function closeCreatureInfo() {
+  creatureInfoPanel?.classList.add("hidden");
+}
+
+function identifyCreature(creature) {
+  if (!creature?.profile) return;
+  state.creatureCodex.set(creature.id, creature);
+  renderCreatureCodex();
+}
+
+function setCodexOpen(open) {
+  state.codexOpen = open;
+  creatureCodexPanel?.classList.toggle("hidden", !open);
+  if (open) {
+    renderCreatureCodex();
+    if (!state.selectedCreatureId && state.creatureCodex.size) {
+      state.selectedCreatureId = [...state.creatureCodex.keys()][0];
+    }
+    renderCreatureCodexDetail(state.creatureCodex.get(state.selectedCreatureId));
+  }
+}
+
+function renderCreatureInfoPanel(creature) {
+  if (!creatureInfoContent) return;
+  creatureInfoContent.innerHTML = creatureSheetHtml(creature, "creatureInfoPreview");
+  renderCreaturePreview(document.getElementById("creatureInfoPreview"), creature, 0.76);
+}
+
+function renderCreatureCodex() {
+  if (!creatureCodexList) return;
+  creatureCodexList.innerHTML = "";
+  if (!state.creatureCodex.size) {
+    creatureCodexList.innerHTML = `<div class="tiny">No creatures discovered yet. Click a nearby creature to identify it.</div>`;
+    if (creatureCodexDetail) creatureCodexDetail.innerHTML = "";
+    return;
+  }
+  for (const creature of state.creatureCodex.values()) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `codex-entry${creature.id === state.selectedCreatureId ? " selected" : ""}`;
+    button.innerHTML = `
+      <canvas class="creature-preview mini-preview" width="44" height="36"></canvas>
+      <span>${escapeHtml(creature.profile.name)}</span>
+    `;
+    button.addEventListener("click", () => {
+      state.selectedCreatureId = creature.id;
+      renderCreatureCodex();
+      renderCreatureCodexDetail(creature);
+    });
+    creatureCodexList.append(button);
+    renderCreaturePreview(button.querySelector("canvas"), creature, 0.36);
+  }
+}
+
+function renderCreatureCodexDetail(creature) {
+  if (!creatureCodexDetail) return;
+  if (!creature) {
+    creatureCodexDetail.innerHTML = `<div class="tiny">Select a discovered creature.</div>`;
+    return;
+  }
+  creatureCodexDetail.innerHTML = creatureSheetHtml(creature, "creatureCodexPreview");
+  renderCreaturePreview(document.getElementById("creatureCodexPreview"), creature, 0.7);
+}
+
+function creatureSheetHtml(creature, previewId) {
+  const profile = creature.profile;
+  const drops = knownDrops(profile).map(escapeHtml).join(", ") || "Unknown";
+  const traits = (profile.specialTraits || []).map(labelize).join(", ") || "None";
+  const palette = profile.colorPalette || {};
+  return `
+    <div class="panel-title">${escapeHtml(profile.name)}</div>
+    <div class="creature-sheet">
+      <canvas id="${previewId}" class="creature-preview" width="112" height="88"></canvas>
+      <div class="creature-facts">
+        <span><strong>Body</strong><br>${escapeHtml(profile.bodyTypeLabel || labelize(profile.bodyType))}</span>
+        <span><strong>Origin</strong><br>${escapeHtml(profile.originBiomeName || "Unknown")}</span>
+        <span><strong>Biome Bound</strong><br>${profile.prefersOriginBiome ? "Prefers origin" : "Wanders freely"}</span>
+        <span><strong>Can Leave</strong><br>${profile.canLeaveOriginBiome ? "Yes" : "No"}</span>
+        <span><strong>Health</strong><br>${Math.ceil(creature.hp)} / ${creature.maxHp}</span>
+        <span><strong>Speed</strong><br>${creature.speed}</span>
+        <span><strong>Attack</strong><br>${escapeHtml(labelize(profile.attackStyle))}</span>
+        <span><strong>Movement</strong><br>${escapeHtml(labelize(profile.movementStyle))}</span>
+        <span><strong>Temperament</strong><br>${escapeHtml(profile.temperament || "Unknown")}</span>
+        <span><strong>Disposition</strong><br>${escapeHtml(creatureDisposition(profile))}</span>
+        <span><strong>Tameable</strong><br>${profile.isTameable ? `Yes (${escapeHtml(profile.tameItem)})` : "No"}</span>
+        <span><strong>Fly / Jump</strong><br>${profile.canFly ? "Flies" : "Grounded"} / ${profile.canJump ? "Jumps" : "No jump"}</span>
+        <span><strong>Hive</strong><br>${profile.hiveMindId ? escapeHtml(profile.hiveMindId) : "No"}</span>
+        <span><strong>Palette</strong><br>${colorSwatch(palette.body)} ${colorSwatch(palette.accent)} ${colorSwatch(palette.dark)}</span>
+        <span class="trait-list"><strong>Special Traits</strong><br>${escapeHtml(traits)}</span>
+        <span class="trait-list"><strong>Known Drops</strong><br>${drops}</span>
+      </div>
+    </div>
+  `;
+}
+
+function renderCreaturePreview(canvasEl, creature, scale = 0.65) {
+  if (!canvasEl) return;
+  const previewCtx = canvasEl.getContext("2d");
+  previewCtx.clearRect(0, 0, canvasEl.width, canvasEl.height);
+  previewCtx.save();
+  previewCtx.fillStyle = "rgba(8, 10, 16, 0.55)";
+  previewCtx.fillRect(0, 0, canvasEl.width, canvasEl.height);
+  previewCtx.translate(0, 5);
+  drawCreature(previewCtx, creature, canvasEl.width / 2, canvasEl.height / 2 + 10, scale);
+  previewCtx.restore();
+}
+
+function knownDrops(profile) {
+  return profile?.lootTable?.knownDrops || profile?.lootTable?.drops?.map((drop) => drop.itemId) || profile?.lootTable?.resources || [];
+}
+
+function creatureDisposition(profile) {
+  if (profile.isTamed) return "Tamed follower";
+  if (profile.isFriendly) return "Friendly";
+  if (["neutral", "scared"].includes(profile.behaviorType)) return "Neutral";
+  return "Hostile";
+}
+
+function labelize(value = "") {
+  return String(value)
+    .replace(/([A-Z])/g, " $1")
+    .replace(/[-_]/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+    .trim();
+}
+
+function colorSwatch(color) {
+  return `<span class="color-swatch" style="background:${escapeHtml(color || "#ffffff")}"></span>`;
+}
+
 function openChest(chest) {
   state.openedChests.add(chest.id);
-  const loot = rollChestLoot(chest);
+  const loot = chest.loot || rollChestLoot(chest);
   for (const [resource, amount] of Object.entries(loot.resources)) addResource(resource, amount);
   if (loot.weaponId) addWeapon(loot.weaponId);
   gainXp(loot.xp);
@@ -1300,6 +1609,7 @@ function draw() {
 function drawWorld() {
   const chunks = state.world.nearbyChunks(state.player.x, state.player.y, 3);
   for (const chunk of chunks) drawChunkGround(chunk);
+  drawWorldBoundary();
   for (const chunk of chunks) {
     for (const hazard of chunk.hazards) drawHazard(hazard);
     for (const prop of chunk.props) drawProp(prop, chunk.biomeProfile);
@@ -1312,6 +1622,18 @@ function drawWorld() {
       drawCreature(ctx, creature, creature.x, creature.y);
     }
   }
+}
+
+function drawWorldBoundary() {
+  const bounds = state.world.bounds;
+  ctx.save();
+  ctx.strokeStyle = "rgba(16, 18, 28, 0.86)";
+  ctx.lineWidth = 28;
+  ctx.strokeRect(bounds.minX - 14, bounds.minY - 14, bounds.width + 28, bounds.height + 28);
+  ctx.strokeStyle = "rgba(255, 244, 190, 0.62)";
+  ctx.lineWidth = 8;
+  ctx.strokeRect(bounds.minX, bounds.minY, bounds.width, bounds.height);
+  ctx.restore();
 }
 
 function drawChunkGround(chunk) {
@@ -1911,6 +2233,11 @@ function renderInventorySlot(stack, index, source) {
   return button;
 }
 
+function renderHearts(hp, maxHp) {
+  const filled = Math.ceil(clamp(hp / Math.max(1, maxHp), 0, 1) * 10);
+  return Array.from({ length: 10 }, (_, index) => `<span>${index < filled ? "♥" : "♡"}</span>`).join("");
+}
+
 function setInventoryOpen(open) {
   state.inventoryOpen = open;
   inventoryPanel?.classList.toggle("hidden", !open);
@@ -1919,16 +2246,13 @@ function setInventoryOpen(open) {
 
 function updateHud() {
   const player = state.player;
-  const weapon = activeWeapon();
   const biome = currentBiome();
   const held = activeItem();
   recountResourceInventory();
-  healthText.textContent = `Health ${Math.ceil(player.hp)} / ${player.maxHp}`;
-  levelText.textContent = `Level ${player.level} | XP ${Math.floor(player.xp)} / ${player.xpNext}`;
+  healthText.innerHTML = renderHearts(player.hp, player.maxHp);
+  levelText.textContent = `L${player.level} XP ${Math.floor(player.xp)}/${player.xpNext}`;
   weaponText.textContent = `Held: ${held?.name || "Empty Hand"}`;
-  resourceText.textContent = RESOURCES.filter((name) => player.inventory[name] > 0)
-    .map((name) => `${name}: ${player.inventory[name]}`)
-    .join(" | ") || "Resources: none yet";
+  resourceText.textContent = "";
   const chunk = state.world.chunkCoords(player.x, player.y);
   const nearestCreature = nearbyCreatures()
     .filter((creature) => !creature.dead && !state.deadCreatures.has(creature.id))
@@ -1958,7 +2282,8 @@ function updateHud() {
     `World seed: ${state.worldSeed}`,
     `Opened chests: ${state.openedChests.size}`,
     `Defeated creatures: ${state.deadCreatures.size}`,
-    `Dropped items: ${state.droppedItems.length}`
+    `Dropped items: ${state.droppedItems.length}`,
+    `World: ${WORLD_CHUNKS_WIDE}x${WORLD_CHUNKS_TALL} finite chunks`
   ].join("\n");
   renderHotbar();
   if (state.inventoryOpen) renderInventoryPanel();
@@ -2018,6 +2343,14 @@ function round(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("keydown", (event) => {
   if (event.code === "F3") {
@@ -2027,6 +2360,14 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.code === "Escape") {
+    if (!creatureInfoPanel.classList.contains("hidden")) {
+      closeCreatureInfo();
+      return;
+    }
+    if (state.codexOpen) {
+      setCodexOpen(false);
+      return;
+    }
     if (state.inventoryOpen) {
       setInventoryOpen(false);
       return;
@@ -2036,20 +2377,19 @@ window.addEventListener("keydown", (event) => {
   }
   input.keys.add(event.code);
   if (!state.started) return;
-  if (event.code === "KeyR") {
+  if (event.code === "KeyE") {
     setInventoryOpen(!state.inventoryOpen);
     return;
   }
-  if (event.code === "Space") input.attackQueued = true;
-  if (event.code === "KeyE") input.interactQueued = true;
   if (event.code === "KeyQ") {
-    dropHotbarSlot(state.player.selectedHotbar);
+    setCodexOpen(!state.codexOpen);
     return;
   }
+  if (event.code === "Space") input.attackQueued = true;
   if (event.code === "KeyC") craftingPanel.classList.toggle("hidden");
   if (/^Digit[1-9]$/.test(event.code)) {
     const index = Number(event.code.slice(-1)) - 1;
-    if (event.shiftKey || input.mouse.down) {
+    if (event.shiftKey) {
       dropHotbarSlot(index, event.shiftKey);
     } else {
       state.player.selectedHotbar = index;
@@ -2064,12 +2404,7 @@ canvas.addEventListener("mousemove", (event) => {
 });
 canvas.addEventListener("mousedown", () => {
   if (!state.started) return;
-  for (let index = 0; index < 9; index += 1) {
-    if (input.keys.has(`Digit${index + 1}`)) {
-      dropHotbarSlot(index);
-      return;
-    }
-  }
+  if (state.inventoryOpen || state.codexOpen || !creatureInfoPanel.classList.contains("hidden")) return;
   input.mouse.down = true;
   input.attackQueued = true;
   input.pickupQueued = true;
@@ -2078,16 +2413,31 @@ window.addEventListener("mouseup", () => {
   input.mouse.down = false;
 });
 
-document.getElementById("joinPublicButton").addEventListener("click", joinPublic);
-document.getElementById("createPrivateButton").addEventListener("click", createPrivate);
+playButton.addEventListener("click", () => showMenuScreen("modeSelectScreen"));
+singlePlayerButton.addEventListener("click", startSoloGame);
+multiplayerButton.addEventListener("click", () => {
+  showMenuScreen("multiplayerBrowserScreen");
+  refreshPublicLobbies();
+});
+modeBackButton.addEventListener("click", () => showMenuScreen("menuTitleScreen"));
+multiplayerBackButton.addEventListener("click", () => showMenuScreen("modeSelectScreen"));
+refreshLobbiesButton.addEventListener("click", refreshPublicLobbies);
+openCreateServerButton.addEventListener("click", () => showMenuScreen("createServerScreen"));
+createBackButton.addEventListener("click", () => showMenuScreen("multiplayerBrowserScreen"));
+serverPublicToggle.addEventListener("click", () => setServerPrivacy("public"));
+serverPrivateToggle.addEventListener("click", () => setServerPrivacy("private"));
+createServerButton.addEventListener("click", createServer);
 document.getElementById("joinCodeButton").addEventListener("click", joinCode);
 document.getElementById("leaveButton").addEventListener("click", leaveMultiplayer);
-playButton.addEventListener("click", startGame);
+closeCreatureInfoButton.addEventListener("click", closeCreatureInfo);
+closeCodexButton.addEventListener("click", () => setCodexOpen(false));
 nameInput.addEventListener("change", savePlayerName);
 
 resizeCanvas();
 renderRecipes();
+setServerPrivacy("public");
+renderLobbyList();
 updateHud();
-setStatus("Offlands loaded. Choose Play for solo, or join multiplayer first.");
+setStatus("", 0);
 ensureMultiplayer().restore().catch(() => updateMultiplayerStatus());
 requestAnimationFrame(loop);

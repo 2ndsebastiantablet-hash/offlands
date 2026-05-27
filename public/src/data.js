@@ -11,7 +11,14 @@ export const RESOURCES = [
   "Ice Shards",
   "Crystals",
   "Ash",
-  "Metal Scraps"
+  "Metal Scraps",
+  "Wing Scraps",
+  "Silk",
+  "Poison Sac",
+  "Scales",
+  "Teeth",
+  "Meat",
+  "Fire Tooth Material"
 ];
 
 export const RESOURCE_COLORS = {
@@ -27,7 +34,14 @@ export const RESOURCE_COLORS = {
   "Ice Shards": "#b9f4ff",
   Crystals: "#85b8ff",
   Ash: "#9c9a94",
-  "Metal Scraps": "#b7c7d3"
+  "Metal Scraps": "#b7c7d3",
+  "Wing Scraps": "#d8fbff",
+  Silk: "#f4ecff",
+  "Poison Sac": "#9ef05c",
+  Scales: "#5ea77e",
+  Teeth: "#f5ead2",
+  Meat: "#d46b69",
+  "Fire Tooth Material": "#ff7438"
 };
 
 export const WEAPONS = {

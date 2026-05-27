@@ -107,15 +107,43 @@ input {
 #hud {
   left: 12px;
   top: 12px;
-  width: min(610px, calc(100% - 24px));
-  padding: 10px 12px;
+  width: auto;
+  max-width: min(560px, calc(100% - 24px));
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
 }
 
 .hud-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px 18px;
+  gap: 8px 12px;
   align-items: center;
+}
+
+.heart-row {
+  display: inline-flex;
+  gap: 2px;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 7px;
+  background: rgba(13, 16, 22, 0.62);
+  color: #ff5d69;
+  font-size: 18px;
+  line-height: 1;
+  text-shadow: 0 0 8px rgba(255, 65, 88, 0.3);
+}
+
+#levelText,
+#weaponText {
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(13, 16, 22, 0.58);
+  color: #efe8c8;
+  font-size: 12px;
 }
 
 .resource-line,
@@ -127,8 +155,23 @@ input {
   line-height: 1.35;
 }
 
+.resource-line {
+  display: none;
+}
+
 .status-line {
+  position: absolute;
+  left: 50%;
+  top: calc(100% + 428px);
+  width: max-content;
+  max-width: min(520px, calc(100vw - 80px));
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(15, 18, 25, 0.72);
   color: #ffd782;
+  text-align: center;
+  transform: translateX(-50%);
 }
 
 .panel {
@@ -152,6 +195,124 @@ input {
   top: 50%;
   width: min(560px, calc(100% - 32px));
   transform: translate(-50%, -50%);
+}
+
+.creature-panel,
+.codex-panel {
+  left: 50%;
+  top: 50%;
+  width: min(620px, calc(100% - 32px));
+  max-height: calc(100% - 36px);
+  overflow: auto;
+  transform: translate(-50%, -50%);
+}
+
+.codex-panel {
+  display: grid;
+  grid-template-columns: minmax(145px, 0.8fr) minmax(220px, 1.2fr);
+  gap: 10px;
+}
+
+.codex-panel > .panel-title,
+.codex-panel > .codex-tab {
+  grid-column: 1 / -1;
+}
+
+.codex-tab {
+  width: max-content;
+  padding: 5px 12px;
+  background: #3d4f87;
+}
+
+.codex-list {
+  display: grid;
+  gap: 7px;
+  align-content: start;
+  max-height: 340px;
+  overflow: auto;
+}
+
+.codex-entry {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  gap: 8px;
+  align-items: center;
+  min-height: 48px;
+  padding: 6px;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.codex-entry.selected {
+  border-color: #fff2a6;
+}
+
+.codex-detail,
+.creature-info-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.creature-sheet {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.creature-preview {
+  width: 112px;
+  height: 88px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(9, 11, 18, 0.54);
+}
+
+.mini-preview {
+  width: 44px;
+  height: 36px;
+}
+
+.color-swatch {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  margin-right: 3px;
+  vertical-align: middle;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+}
+
+.creature-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 10px;
+  color: #d9ddca;
+  font-size: 12px;
+}
+
+.creature-facts strong {
+  color: #fff2a6;
+}
+
+.trait-list {
+  grid-column: 1 / -1;
+  color: #f3e7ff;
+}
+
+.close-button {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  z-index: 2;
+}
+
+.icon-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
 }
 
 #hotbar {
@@ -292,6 +453,15 @@ input {
   text-align: center;
 }
 
+.menu-view {
+  display: grid;
+  gap: 12px;
+}
+
+.menu-view.hidden {
+  display: none;
+}
+
 .menu-card h1 {
   margin: 0;
   color: #fff8cc;
@@ -299,6 +469,48 @@ input {
   line-height: 0.95;
   letter-spacing: 0;
   text-shadow: 0 0 24px rgba(255, 224, 112, 0.22);
+}
+
+.wavy-title {
+  display: flex;
+  justify-content: center;
+  gap: 1px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.wavy-title span {
+  display: inline-block;
+  animation: titleWave 1.9s ease-in-out infinite, titleColor 5.2s linear infinite;
+  animation-delay: calc(var(--i) * 0.08s), calc(var(--i) * -0.3s);
+}
+
+@keyframes titleWave {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-1deg);
+  }
+  50% {
+    transform: translateY(-9px) rotate(2deg);
+  }
+}
+
+@keyframes titleColor {
+  0% {
+    color: #fff08b;
+  }
+  25% {
+    color: #7df1ff;
+  }
+  50% {
+    color: #ff7ad6;
+  }
+  75% {
+    color: #8dff8f;
+  }
+  100% {
+    color: #fff08b;
+  }
 }
 
 .tagline {
@@ -320,16 +532,61 @@ input {
   background: #9365c2;
 }
 
-.menu-divider {
-  height: 1px;
-  margin: 22px 0 14px;
-  background: rgba(255, 255, 255, 0.16);
+.alt-action {
+  background: #2a696f;
 }
 
 .menu-grid {
   display: grid;
   grid-template-columns: 1fr auto auto;
   gap: 8px;
+}
+
+.compact-grid,
+.private-join-row,
+.server-type-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.private-join-row {
+  grid-template-columns: 1fr auto;
+}
+
+.server-type-row {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.server-type-row .selected,
+.codex-tab.selected {
+  border-color: #fff2a6;
+  box-shadow: 0 0 0 2px rgba(255, 226, 93, 0.25);
+}
+
+.lobby-list {
+  display: grid;
+  gap: 7px;
+  min-height: 112px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.lobby-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.055);
+  text-align: left;
+}
+
+.lobby-name {
+  color: #fff2a6;
+  font-weight: 700;
 }
 
 .hidden {
@@ -339,6 +596,8 @@ input {
 .game-not-started #hud,
 .game-not-started #craftingPanel,
 .game-not-started #inventoryPanel,
+.game-not-started #creatureInfoPanel,
+.game-not-started #creatureCodexPanel,
 .game-not-started #hotbar,
 .game-not-started #debugOverlay {
   display: none;
@@ -372,7 +631,9 @@ input {
 
   #hud,
   #craftingPanel,
-  #inventoryPanel {
+  #inventoryPanel,
+  .creature-panel,
+  .codex-panel {
     left: 8px;
     right: 8px;
     width: auto;
@@ -386,6 +647,24 @@ input {
     left: 8px;
     right: 8px;
     transform: translateY(-50%);
+  }
+
+  .creature-panel,
+  .codex-panel {
+    grid-template-columns: 1fr;
+    transform: translateY(-50%);
+  }
+
+  .creature-sheet {
+    grid-template-columns: 1fr;
+  }
+
+  .creature-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .status-line {
+    top: calc(100% + 360px);
   }
 
   #hotbar {

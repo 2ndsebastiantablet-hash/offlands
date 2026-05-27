@@ -995,12 +995,59 @@ function legsForBody(bodyType, movementStyle) {
 
 function buildLootTable(bodyType, biome, details, tier) {
   const resources = [...(biome.resources || [])];
-  if (bodyType.id === "crystal") resources.push("Crystals");
-  if (bodyType.id === "boneBeast" || bodyType.id === "skull") resources.push("Bone");
-  if (details.some((detail) => detail.id === "poisonSacs")) resources.push("Slime");
-  if (details.some((detail) => detail.id === "glowingVeins")) resources.push("Glow Spores");
+  const drops = [];
+  const addDrop = (itemId, chance = 0.35, min = 1, max = 2) => {
+    if (!itemId) return;
+    drops.push({ itemId, chance, min, max });
+    resources.push(itemId);
+  };
+
+  for (const resource of biome.resources || []) addDrop(resource, 0.18, 1, 2);
+
+  if (bodyType.id === "bat") {
+    addDrop("Wing Scraps", 0.62, 1, 2);
+    addDrop("Glow Spores", 0.36, 1, 2);
+  }
+  if (bodyType.id === "caterpillar") {
+    addDrop("Leaves", 0.58, 1, 3);
+    addDrop("Silk", 0.45, 1, 2);
+    addDrop("Poison Sac", 0.16, 1, 1);
+  }
+  if (bodyType.id === "crocodile") {
+    addDrop("Scales", 0.55, 1, 2);
+    addDrop("Teeth", 0.34, 1, 2);
+    addDrop("Meat", 0.3, 1, 2);
+    addDrop("Bone", 0.22, 1, 2);
+  }
+  if (bodyType.id === "crystal" || bodyType.id === "floatingOrb") {
+    addDrop("Crystals", 0.6, 1, 3);
+    addDrop("Glow Spores", 0.36, 1, 2);
+  }
+  if (["boneBeast", "skull", "worm"].includes(bodyType.id)) {
+    addDrop("Bone", 0.58, 1, 3);
+    addDrop("Dry Wood", 0.22, 1, 2);
+  }
+  if (["slime", "frog", "plant"].includes(bodyType.id)) {
+    addDrop("Slime", 0.45, 1, 2);
+    addDrop("Leaves", 0.25, 1, 2);
+  }
+  if (bodyType.id === "bird") addDrop("Wing Scraps", 0.42, 1, 2);
+  if (bodyType.id === "spider" || bodyType.id === "tinyBug") addDrop("Silk", 0.38, 1, 2);
+  if (bodyType.id === "giantHeavy") addDrop("Metal Scraps", 0.2, 1, 2);
+
+  if (details.some((detail) => detail.id === "poisonSacs")) addDrop("Poison Sac", 0.42, 1, 2);
+  if (details.some((detail) => detail.id === "glowingVeins")) addDrop("Glow Spores", 0.42, 1, 2);
+  if (details.some((detail) => detail.id === "crystals")) addDrop("Crystals", 0.5, 1, 2);
+  if (details.some((detail) => detail.id === "scales")) addDrop("Scales", 0.42, 1, 2);
+  if (details.some((detail) => detail.id === "bones")) addDrop("Bone", 0.42, 1, 2);
+  if (details.some((detail) => detail.id === "wings")) addDrop("Wing Scraps", 0.36, 1, 2);
+  if (details.some((detail) => detail.id === "mushrooms")) addDrop("Mushroom Caps", 0.38, 1, 2);
+  if (bodyType.attacks.includes("fireBreath")) addDrop("Fire Tooth Material", 0.18, 1, 1);
+
   return {
     resources: unique(resources),
+    drops,
+    knownDrops: unique(drops.map((drop) => drop.itemId)),
     min: tier.id === "tiny" ? 1 : 2,
     max: tier.id === "giant" || tier.id === "nearInvincible" ? 5 : 3,
     rareWeaponChance: bodyType.id === "boneBeast" || bodyType.id === "crystal" ? 0.08 : 0.03
