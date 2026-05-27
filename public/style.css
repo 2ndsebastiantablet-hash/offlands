@@ -147,6 +147,94 @@ input {
   top: 12px;
 }
 
+#inventoryPanel {
+  left: 50%;
+  top: 50%;
+  width: min(560px, calc(100% - 32px));
+  transform: translate(-50%, -50%);
+}
+
+#hotbar {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: 12px;
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 48px));
+  gap: 5px;
+  width: min(480px, calc(100% - 24px));
+  transform: translateX(-50%);
+}
+
+.hotbar-slot,
+.inventory-slot {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 48px;
+  padding: 4px;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: rgba(12, 16, 24, 0.82);
+}
+
+.hotbar-slot.selected,
+.inventory-slot.selected {
+  border-color: #fff2a6;
+  box-shadow: 0 0 0 2px rgba(255, 226, 93, 0.35), 0 0 18px rgba(255, 226, 93, 0.22);
+}
+
+.slot-number {
+  position: absolute;
+  left: 4px;
+  top: 2px;
+  color: #bfc9d3;
+  font-size: 10px;
+}
+
+.slot-icon {
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 4px;
+  box-shadow: inset 0 -4px 0 rgba(0, 0, 0, 0.18);
+}
+
+.slot-name {
+  width: 100%;
+  overflow: hidden;
+  color: #f7f3e8;
+  font-size: 9px;
+  line-height: 1.05;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slot-qty {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  color: #fff2a6;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.small-title {
+  margin-top: 10px;
+  margin-bottom: 6px;
+  font-size: 13px;
+}
+
+.inventory-grid {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 5px;
+  margin-top: 8px;
+}
+
 #recipeList {
   display: grid;
   gap: 7px;
@@ -257,6 +345,8 @@ input {
 .game-not-started #hud,
 .game-not-started #helpPanel,
 .game-not-started #craftingPanel,
+.game-not-started #inventoryPanel,
+.game-not-started #hotbar,
 .game-not-started #debugOverlay {
   display: none;
 }
@@ -289,7 +379,8 @@ input {
 
   #hud,
   #helpPanel,
-  #craftingPanel {
+  #craftingPanel,
+  #inventoryPanel {
     left: 8px;
     right: 8px;
     width: auto;
@@ -299,7 +390,19 @@ input {
     top: 8px;
   }
 
+  #inventoryPanel {
+    left: 8px;
+    right: 8px;
+    transform: translateY(-50%);
+  }
+
   #helpPanel {
+    display: none;
+  }
+
+  #hotbar {
+    grid-template-columns: repeat(9, minmax(0, 1fr));
+    gap: 3px;
     bottom: 8px;
   }
 }

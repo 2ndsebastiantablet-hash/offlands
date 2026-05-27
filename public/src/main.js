@@ -1,4 +1,4 @@
-import { BIOMES, RECIPES, RESOURCES, WEAPONS } from "./data.js";
+import { ITEM_DEFS, RECIPES, RESOURCE_COLORS, RESOURCES, WEAPONS } from "./data.js";
 import { drawCreature } from "./creatures.js";
 import { CHUNK_SIZE, World } from "./world.js";
 import { MultiplayerClient } from "../frontend/multiplayer-client.js";
@@ -17,6 +17,11 @@ const statusText = document.getElementById("statusText");
 const debugOverlay = document.getElementById("debugOverlay");
 const craftingPanel = document.getElementById("craftingPanel");
 const recipeList = document.getElementById("recipeList");
+const hotbarEl = document.getElementById("hotbar");
+const inventoryPanel = document.getElementById("inventoryPanel");
+const inventoryGrid = document.getElementById("inventoryGrid");
+const inventoryHotbar = document.getElementById("inventoryHotbar");
+const inventoryDetails = document.getElementById("inventoryDetails");
 const multiplayerStatus = document.getElementById("multiplayerStatus");
 const nameInput = document.getElementById("nameInput");
 const codeInput = document.getElementById("codeInput");
@@ -31,7 +36,8 @@ const input = {
   keys: new Set(),
   mouse: { x: 0, y: 0, worldX: 0, worldY: 0, down: false },
   attackQueued: false,
-  interactQueued: false
+  interactQueued: false,
+  pickupQueued: false
 };
 
 const state = {
@@ -53,13 +59,18 @@ const state = {
   enemyProjectiles: [],
   effects: [],
   floatingText: [],
+  droppedItems: [],
   markers: [],
   attackSeq: 0,
+  dropSeq: 0,
+  inventoryOpen: false,
   lastStatePush: 0,
   statusTimer: 0,
   player: {
     x: 320,
     y: 320,
+    vx: 0,
+    vy: 0,
     radius: 18,
     hp: 100,
     maxHp: 100,
@@ -68,8 +79,9 @@ const state = {
     xp: 0,
     xpNext: 50,
     damageBonus: 1,
-    weaponIds: ["stickSword"],
-    activeWeaponIndex: 0,
+    hotbar: createSlots(9, [{ id: "stickSword", quantity: 1 }]),
+    inventorySlots: createSlots(27),
+    selectedHotbar: 0,
     inventory: Object.fromEntries(RESOURCES.map((name) => [name, 0])),
     cooldown: 0,
     hurtTimer: 0,
@@ -126,14 +138,25 @@ function startGame() {
 function returnToMenu() {
   state.started = false;
   input.mouse.down = false;
+  setInventoryOpen(false);
   mainMenu.classList.remove("hidden");
   craftingPanel.classList.add("hidden");
   shell.classList.add("game-not-started");
   updateMultiplayerStatus();
 }
 
+function selectedHotbarStack() {
+  return state.player.hotbar[state.player.selectedHotbar] || null;
+}
+
+function activeItem() {
+  const stack = selectedHotbarStack();
+  return stack ? ITEM_DEFS[stack.id] : null;
+}
+
 function activeWeapon() {
-  return WEAPONS[state.player.weaponIds[state.player.activeWeaponIndex]] || WEAPONS.stickSword;
+  const stack = selectedHotbarStack();
+  return stack && WEAPONS[stack.id] ? WEAPONS[stack.id] : WEAPONS.stickSword;
 }
 
 function currentBiome() {
@@ -156,7 +179,7 @@ function playerStatePayload() {
     aimY: round(aim.y),
     hp: Math.max(0, Math.round(state.player.hp)),
     maxHp: state.player.maxHp,
-    weaponId: activeWeapon().id,
+    weaponId: WEAPONS[selectedHotbarStack()?.id] ? selectedHotbarStack().id : null,
     level: state.player.level,
     attackSeq: state.attackSeq,
     worldSeed: state.worldSeed
@@ -349,11 +372,14 @@ function update(dt, now) {
     if (player.respawnTimer <= 0) respawnPlayer();
   } else {
     movePlayer(dt);
-    if (input.attackQueued || input.mouse.down) attack(now);
+    updateHazardEffects(dt);
+    const clickedPickup = input.pickupQueued && pickupDroppedAt(input.mouse.worldX, input.mouse.worldY);
+    if (!clickedPickup && (input.attackQueued || input.mouse.down)) useSelectedItem(now);
     if (input.interactQueued) interact();
   }
   input.attackQueued = false;
   input.interactQueued = false;
+  input.pickupQueued = false;
 
   player.cooldown = Math.max(0, player.cooldown - dt * 1000);
   player.hurtTimer = Math.max(0, player.hurtTimer - dt);
@@ -376,20 +402,106 @@ function movePlayer(dt) {
   if (input.keys.has("KeyW") || input.keys.has("ArrowUp")) y -= 1;
   if (input.keys.has("KeyS") || input.keys.has("ArrowDown")) y += 1;
   const dir = normalize(x, y);
-  const speedMod = playerInSlime() ? 0.65 : 1;
-  if (x || y) {
-    player.x += dir.x * player.baseSpeed * speedMod * dt;
-    player.y += dir.y * player.baseSpeed * speedMod * dt;
+  const biome = currentBiome();
+  const mods = biome.gameplayModifiers || {};
+  const hazardMove = playerHazardMoveMultiplier();
+  const speed = player.baseSpeed * (mods.playerSpeed || 1) * hazardMove;
+  const inertia = mods.inertia || 0;
+  const windPush = biome.wind?.strength || 0;
+
+  if (inertia > 0.05) {
+    const accel = speed * (5.5 - inertia * 2.8);
+    player.vx += dir.x * accel * dt;
+    player.vy += dir.y * accel * dt;
+    const damping = Math.pow(0.0008 + inertia * 0.72, dt);
+    player.vx *= damping;
+    player.vy *= damping;
+    const maxSpeed = speed * (1.15 + inertia * 0.35);
+    const currentSpeed = Math.hypot(player.vx, player.vy);
+    if (currentSpeed > maxSpeed) {
+      player.vx = (player.vx / currentSpeed) * maxSpeed;
+      player.vy = (player.vy / currentSpeed) * maxSpeed;
+    }
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+  } else if (x || y) {
+    player.vx = dir.x * speed;
+    player.vy = dir.y * speed;
+    player.x += player.vx * dt;
+    player.y += player.vy * dt;
+  } else {
+    player.vx = 0;
+    player.vy = 0;
+  }
+
+  if (windPush > 0) {
+    player.x += biome.wind.x * windPush * 0.38 * dt;
+    player.y += biome.wind.y * windPush * 0.38 * dt;
   }
 }
 
-function playerInSlime() {
+function playerHazardMoveMultiplier() {
+  let multiplier = 1;
   for (const chunk of state.world.nearbyChunks(state.player.x, state.player.y, 1)) {
     for (const hazard of chunk.hazards) {
-      if (distance(state.player, hazard) < hazard.radius) return true;
+      if (distance(state.player, hazard) >= hazard.radius) continue;
+      if (hazard.type === "slime") multiplier = Math.min(multiplier, 0.65);
+      if (hazard.type === "ice") multiplier = Math.min(multiplier, 0.88);
+      if (hazard.type === "poisonGas") multiplier = Math.min(multiplier, 0.86);
+      if (hazard.type === "windStream") {
+        state.player.x += hazard.windX * hazard.push * 0.004;
+        state.player.y += hazard.windY * hazard.push * 0.004;
+      }
     }
   }
-  return false;
+  return multiplier;
+}
+
+function updateHazardEffects(dt) {
+  let damage = 0;
+  for (const chunk of state.world.nearbyChunks(state.player.x, state.player.y, 1)) {
+    for (const hazard of chunk.hazards) {
+      if (distance(state.player, hazard) >= hazard.radius) continue;
+      if (hazard.type === "poisonGas") damage += (hazard.damage || 5) * dt;
+      if (hazard.type === "lavaCrack") damage += (hazard.damage || 9) * dt;
+      if (hazard.type === "spikes") damage += (hazard.damage || 7) * dt;
+      if (hazard.type === "windStream") {
+        state.player.x += hazard.windX * hazard.push * dt;
+        state.player.y += hazard.windY * hazard.push * dt;
+      }
+    }
+  }
+  if (damage > 0) hurtPlayer(damage, { x: 0, y: 0 }, false);
+}
+
+function useSelectedItem(now) {
+  const item = activeItem();
+  const stack = selectedHotbarStack();
+  if (!item) {
+    if (input.attackQueued) setStatus("Selected hotbar slot is empty.", 1);
+    return;
+  }
+  if (item?.type === "consumable" && stack?.id === "healingPack") {
+    if (state.player.hp >= state.player.maxHp) {
+      setStatus("Health is already full.", 1.1);
+      return;
+    }
+    state.player.hp = Math.min(state.player.maxHp, state.player.hp + 25);
+    removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
+    setStatus("Used Healing Fruit Pack.");
+    return;
+  }
+  if (item?.type === "placeable" && stack?.id === "campMarker") {
+    state.markers.push({ x: state.player.x, y: state.player.y });
+    removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
+    setStatus("Placed a Camp Marker.");
+    return;
+  }
+  if (item.type !== "weapon") {
+    if (input.attackQueued) setStatus(`${item.name} is not a weapon.`, 1);
+    return;
+  }
+  attack(now);
 }
 
 function attack(now) {
@@ -400,19 +512,23 @@ function attack(now) {
   state.attackSeq += 1;
   const aim = normalize(input.mouse.worldX - player.x, input.mouse.worldY - player.y);
   state.effects.push({ type: "swing", x: player.x, y: player.y, aim, weapon, life: 0.16, maxLife: 0.16 });
+  const biome = currentBiome();
+  const projectileRange = biome.gameplayModifiers?.projectileRange || 1;
+  const projectileSpeed = biome.gameplayModifiers?.projectileSpeed || 1;
 
   if (weapon.type === "ranged") {
     state.projectiles.push({
       x: player.x + aim.x * 24,
       y: player.y + aim.y * 24,
-      vx: aim.x * weapon.speed,
-      vy: aim.y * weapon.speed,
+      vx: aim.x * weapon.speed * projectileSpeed,
+      vy: aim.y * weapon.speed * projectileSpeed,
       damage: scaledDamage(weapon.damage),
       traveled: 0,
-      range: weapon.range,
+      range: weapon.range * projectileRange,
       radius: weapon.id === "slimeGun" ? 9 : 5,
       color: weapon.color,
-      effect: weapon.id
+      effect: weapon.id,
+      glow: biome.projectileEffect?.glow || 1
     });
   } else {
     meleeHit(weapon, aim);
@@ -440,10 +556,11 @@ function scaledDamage(amount) {
 
 function damageCreature(creature, amount, weapon, dir) {
   const finalDamage = Math.max(1, Math.round(amount * (1 - creature.defense)));
+  const knockbackScale = currentBiome().gameplayModifiers?.knockback || 1;
   creature.hp -= finalDamage;
   creature.hurtTimer = 0.18;
-  creature.x += dir.x * (weapon.knockback || 55) * 0.045;
-  creature.y += dir.y * (weapon.knockback || 55) * 0.045;
+  creature.x += dir.x * (weapon.knockback || 55) * 0.045 * knockbackScale;
+  creature.y += dir.y * (weapon.knockback || 55) * 0.045 * knockbackScale;
   if (weapon.id === "slimeGun") creature.slowTimer = 2.2;
   if (weapon.id === "fireTooth") creature.burnTimer = 3;
   addFloatingText(`-${finalDamage}`, creature.x, creature.y - 24, "#fff1a8");
@@ -454,10 +571,10 @@ function killCreature(creature) {
   if (state.deadCreatures.has(creature.id)) return;
   creature.dead = true;
   state.deadCreatures.add(creature.id);
-  const biome = BIOMES[creature.biomeId];
+  const biome = state.world.getBiomeAt(creature.x, creature.y);
   const rng = seeded(`${state.worldSeed}:drop:${creature.id}`);
   const resource = biome.resources[Math.floor(rng() * biome.resources.length)];
-  addResource(resource, 1 + Math.floor(rng() * 2));
+  spawnDroppedItem(resource, 1 + Math.floor(rng() * 2), creature.x, creature.y);
   gainXp(creature.xp);
   addFloatingText(`+${creature.xp} XP`, creature.x, creature.y - 42, "#a7ff8b");
   sendWorldEvent("creature_killed", { creatureId: creature.id });
@@ -468,6 +585,7 @@ function nearbyCreatures() {
 }
 
 function updateCreatures(chunk, dt) {
+  const biome = chunk.biomeProfile;
   for (const creature of chunk.creatures) {
     if (state.deadCreatures.has(creature.id)) {
       creature.dead = true;
@@ -498,8 +616,17 @@ function updateCreatures(chunk, dt) {
       move = { x: Math.cos(creature.wanderAngle), y: Math.sin(creature.wanderAngle) };
     }
 
+    const drift = creature.flying || creature.drift ? (biome.gameplayModifiers?.inertia || 0) : 0;
     creature.x += move.x * speed * dt;
     creature.y += move.y * speed * dt;
+    if (drift > 0.2) {
+      creature.x += Math.sin(performance.now() / 700 + creature.spawnX) * drift * 14 * dt;
+      creature.y += Math.cos(performance.now() / 900 + creature.spawnY) * drift * 12 * dt;
+    }
+    if (biome.wind?.strength > 0 && !creature.parts.skin) {
+      creature.x += biome.wind.x * biome.wind.strength * 0.18 * dt;
+      creature.y += biome.wind.y * biome.wind.strength * 0.18 * dt;
+    }
     creature.x = clamp(creature.x, chunk.x + 28, chunk.x + CHUNK_SIZE - 28);
     creature.y = clamp(creature.y, chunk.y + 28, chunk.y + CHUNK_SIZE - 28);
 
@@ -517,13 +644,14 @@ function updateCreatures(chunk, dt) {
         state.enemyProjectiles.push({
           x: creature.x,
           y: creature.y,
-          vx: dir.x * 360,
-          vy: dir.y * 360,
+          vx: dir.x * 360 * (biome.gameplayModifiers?.projectileSpeed || 1),
+          vy: dir.y * 360 * (biome.gameplayModifiers?.projectileSpeed || 1),
           damage: creature.damage + 5,
           traveled: 0,
-          range: 520,
+          range: 520 * (biome.gameplayModifiers?.projectileRange || 1),
           radius: 5,
-          color: "#ff4ca3"
+          color: "#ff4ca3",
+          effect: "laser"
         });
       }
     }
@@ -547,6 +675,12 @@ function updateProjectiles(dt) {
 function updateProjectileList(list, dt, fromPlayer) {
   for (let index = list.length - 1; index >= 0; index -= 1) {
     const projectile = list[index];
+    const biome = state.world.getBiomeAt(projectile.x, projectile.y);
+    const windForce = (biome.gameplayModifiers?.projectileWind || 0) * (biome.wind?.strength || 0);
+    if (windForce > 0) {
+      projectile.vx += biome.wind.x * windForce * dt;
+      projectile.vy += biome.wind.y * windForce * dt;
+    }
     projectile.x += projectile.vx * dt;
     projectile.y += projectile.vy * dt;
     const step = Math.hypot(projectile.vx * dt, projectile.vy * dt);
@@ -571,13 +705,15 @@ function updateProjectileList(list, dt, fromPlayer) {
   }
 }
 
-function hurtPlayer(amount, dir) {
+function hurtPlayer(amount, dir, knockback = true) {
   const player = state.player;
   if (player.respawnTimer > 0) return;
   player.hp -= amount;
   player.hurtTimer = 0.25;
-  player.x += dir.x * 12;
-  player.y += dir.y * 12;
+  if (knockback) {
+    player.x += dir.x * 12;
+    player.y += dir.y * 12;
+  }
   addFloatingText(`-${Math.round(amount)}`, player.x, player.y - 30, "#ffb0a8");
   if (player.hp <= 0) {
     player.hp = 0;
@@ -589,12 +725,15 @@ function hurtPlayer(amount, dir) {
 function respawnPlayer() {
   state.player.x = 320;
   state.player.y = 320;
+  state.player.vx = 0;
+  state.player.vy = 0;
   state.player.hp = state.player.maxHp;
   state.enemyProjectiles.length = 0;
   setStatus("Respawned at the starting camp.");
 }
 
 function interact() {
+  if (pickupNearestDroppedItem()) return;
   for (const chunk of state.world.nearbyChunks(state.player.x, state.player.y, 1)) {
     for (const resource of chunk.resources) {
       if (resource.collected || distance(resource, state.player) > 44) continue;
@@ -619,12 +758,13 @@ function openChest(chest) {
   for (const [resource, amount] of Object.entries(loot.resources)) addResource(resource, amount);
   if (loot.weaponId) addWeapon(loot.weaponId);
   gainXp(loot.xp);
-  setStatus(`${BIOMES[chest.biomeId].chestName} opened: ${loot.summary}`);
+  const biome = state.world.getBiomeAt(chest.x, chest.y);
+  setStatus(`${biome.chestName} opened: ${loot.summary}`);
   sendWorldEvent("chest_opened", { chestId: chest.id });
 }
 
 function rollChestLoot(chest) {
-  const biome = BIOMES[chest.biomeId];
+  const biome = state.world.getBiomeAt(chest.x, chest.y);
   const rng = seeded(`${state.worldSeed}:loot:${chest.id}`);
   const resources = {};
   const rolls = 2 + Math.floor(rng() * 3);
@@ -643,15 +783,194 @@ function rollChestLoot(chest) {
 }
 
 function addResource(resource, amount) {
-  state.player.inventory[resource] = (state.player.inventory[resource] || 0) + amount;
+  addItem(resource, amount);
 }
 
 function addWeapon(weaponId) {
   if (!WEAPONS[weaponId]) return;
-  if (!state.player.weaponIds.includes(weaponId)) {
-    state.player.weaponIds.push(weaponId);
-    setStatus(`Found ${WEAPONS[weaponId].name}.`);
+  if (hasInventoryItem(weaponId)) return;
+  addItem(weaponId, 1);
+  setStatus(`Found ${WEAPONS[weaponId].name}.`);
+}
+
+function createSlots(count, starters = []) {
+  const slots = Array.from({ length: count }, () => null);
+  starters.forEach((stack, index) => {
+    slots[index] = { id: stack.id, quantity: stack.quantity || 1 };
+  });
+  return slots;
+}
+
+function allSlots() {
+  return [...state.player.hotbar, ...state.player.inventorySlots];
+}
+
+function inventoryContainers() {
+  return [state.player.hotbar, state.player.inventorySlots];
+}
+
+function itemDef(itemId) {
+  return ITEM_DEFS[itemId] || {
+    id: itemId,
+    name: itemId,
+    type: "resource",
+    stackable: true,
+    maxStack: 99,
+    color: "#ffffff",
+    description: "Item"
+  };
+}
+
+function addItem(itemId, quantity = 1) {
+  const def = itemDef(itemId);
+  let remaining = quantity;
+
+  if (def.stackable) {
+    for (const slots of inventoryContainers()) {
+      for (const slot of slots) {
+        if (!slot || slot.id !== itemId) continue;
+        const room = (def.maxStack || 99) - slot.quantity;
+        if (room <= 0) continue;
+        const moved = Math.min(room, remaining);
+        slot.quantity += moved;
+        remaining -= moved;
+        if (remaining <= 0) {
+          recountResourceInventory();
+          return true;
+        }
+      }
+    }
   }
+
+  for (const slots of inventoryContainers()) {
+    for (let index = 0; index < slots.length; index += 1) {
+      if (slots[index]) continue;
+      const moved = def.stackable ? Math.min(def.maxStack || 99, remaining) : 1;
+      slots[index] = { id: itemId, quantity: moved };
+      remaining -= moved;
+      if (remaining <= 0) {
+        recountResourceInventory();
+        return true;
+      }
+    }
+  }
+
+  if (remaining > 0) {
+    spawnDroppedItem(itemId, remaining, state.player.x + 28, state.player.y + 12);
+    setStatus("Inventory full. Extra item dropped nearby.");
+  }
+  recountResourceInventory();
+  return remaining <= 0;
+}
+
+function hasInventoryItem(itemId) {
+  return allSlots().some((slot) => slot?.id === itemId);
+}
+
+function recountResourceInventory() {
+  state.player.inventory = Object.fromEntries(RESOURCES.map((name) => [name, 0]));
+  for (const slot of allSlots()) {
+    if (slot && RESOURCES.includes(slot.id)) {
+      state.player.inventory[slot.id] += slot.quantity;
+    }
+  }
+}
+
+function removeResource(resource, amount) {
+  let remaining = amount;
+  for (const slots of inventoryContainers()) {
+    for (let index = 0; index < slots.length; index += 1) {
+      const slot = slots[index];
+      if (!slot || slot.id !== resource) continue;
+      const moved = Math.min(slot.quantity, remaining);
+      slot.quantity -= moved;
+      remaining -= moved;
+      if (slot.quantity <= 0) slots[index] = null;
+      if (remaining <= 0) {
+        recountResourceInventory();
+        return true;
+      }
+    }
+  }
+  recountResourceInventory();
+  return false;
+}
+
+function removeFromSlot(slots, index, quantity = 1) {
+  const slot = slots[index];
+  if (!slot) return null;
+  const removed = { id: slot.id, quantity: Math.min(quantity, slot.quantity) };
+  slot.quantity -= removed.quantity;
+  if (slot.quantity <= 0) slots[index] = null;
+  recountResourceInventory();
+  return removed;
+}
+
+function dropHotbarSlot(index, dropAll = false) {
+  const slot = state.player.hotbar[index];
+  if (!slot) {
+    setStatus(`Hotbar slot ${index + 1} is empty.`, 1);
+    return;
+  }
+  const quantity = dropAll || !itemDef(slot.id).stackable ? slot.quantity : 1;
+  const removed = removeFromSlot(state.player.hotbar, index, quantity);
+  if (!removed) return;
+  spawnDroppedItem(
+    removed.id,
+    removed.quantity,
+    state.player.x + 26 + Math.random() * 18,
+    state.player.y + 12 + Math.random() * 18
+  );
+  setStatus(`Dropped ${itemDef(removed.id).name}.`);
+}
+
+function spawnDroppedItem(itemId, quantity, x, y) {
+  const def = itemDef(itemId);
+  state.dropSeq += 1;
+  state.droppedItems.push({
+    id: `drop:${Date.now()}:${state.dropSeq}`,
+    itemId,
+    itemType: def.type,
+    name: def.name,
+    quantity,
+    x,
+    y,
+    color: def.color,
+    radius: def.type === "weapon" ? 11 : 8
+  });
+}
+
+function pickupNearestDroppedItem() {
+  let nearest = null;
+  let nearestDistance = Infinity;
+  for (const item of state.droppedItems) {
+    const dist = distance(item, state.player);
+    if (dist < nearestDistance && dist < 52) {
+      nearest = item;
+      nearestDistance = dist;
+    }
+  }
+  if (!nearest) return false;
+  return pickupDroppedItem(nearest);
+}
+
+function pickupDroppedAt(x, y) {
+  for (const item of state.droppedItems) {
+    if (distance(item, state.player) > 72) continue;
+    if (Math.hypot(item.x - x, item.y - y) > item.radius + 14) continue;
+    return pickupDroppedItem(item);
+  }
+  return false;
+}
+
+function pickupDroppedItem(item) {
+  const index = state.droppedItems.indexOf(item);
+  if (index < 0) return false;
+  addItem(item.itemId, item.quantity);
+  state.droppedItems.splice(index, 1);
+  addFloatingText(`+${item.quantity} ${item.name}`, item.x, item.y - 18, "#def7c4");
+  setStatus(`Picked up ${item.quantity} ${item.name}.`, 1.6);
+  return true;
 }
 
 function gainXp(amount) {
@@ -675,17 +994,17 @@ function craft(recipe) {
     return;
   }
   for (const [resource, amount] of Object.entries(cost)) {
-    state.player.inventory[resource] -= amount;
+    removeResource(resource, amount);
   }
   if (recipe.id === "healingPack") {
-    state.player.hp = Math.min(state.player.maxHp, state.player.hp + 25);
+    addItem("healingPack", recipe.quantity || 1);
     setStatus("Crafted Healing Fruit Pack.");
   } else if (recipe.weapon) {
     addWeapon(recipe.weapon);
     setStatus(`Crafted ${WEAPONS[recipe.weapon].name}.`);
   } else if (recipe.marker) {
-    state.markers.push({ x: state.player.x, y: state.player.y });
-    setStatus("Placed a Camp Marker.");
+    addItem("campMarker", recipe.quantity || 1);
+    setStatus("Crafted a Camp Marker.");
   }
 }
 
@@ -730,6 +1049,7 @@ function draw() {
   ctx.translate(state.viewport.width / 2 - state.camera.x, state.viewport.height / 2 - state.camera.y);
   drawWorld();
   drawMarkers();
+  drawDroppedItems();
   drawRemotePlayers();
   drawPlayer();
   drawProjectiles();
@@ -737,6 +1057,7 @@ function draw() {
   drawFloatingText();
   drawLighting();
   ctx.restore();
+  drawWeatherOverlay();
 }
 
 function drawWorld() {
@@ -744,7 +1065,7 @@ function drawWorld() {
   for (const chunk of chunks) drawChunkGround(chunk);
   for (const chunk of chunks) {
     for (const hazard of chunk.hazards) drawHazard(hazard);
-    for (const prop of chunk.props) drawProp(prop, chunk.biomeId);
+    for (const prop of chunk.props) drawProp(prop, chunk.biomeProfile);
     for (const resource of chunk.resources) drawResource(resource);
     for (const chest of chunk.chests) drawChest(chest);
   }
@@ -757,7 +1078,7 @@ function drawWorld() {
 }
 
 function drawChunkGround(chunk) {
-  const biome = BIOMES[chunk.biomeId];
+  const biome = chunk.biomeProfile;
   ctx.fillStyle = biome.ground;
   ctx.fillRect(chunk.x, chunk.y, CHUNK_SIZE, CHUNK_SIZE);
   ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
@@ -777,8 +1098,7 @@ function drawChunkGround(chunk) {
   ctx.globalAlpha = 1;
 }
 
-function drawProp(prop, biomeId) {
-  const biome = BIOMES[biomeId];
+function drawProp(prop, biome) {
   ctx.save();
   ctx.translate(prop.x, prop.y);
   if (prop.allowRotation) ctx.rotate(prop.spin);
@@ -800,6 +1120,12 @@ function drawProp(prop, biomeId) {
       ctx.fillRect(4, -2, 10, 4);
     }
     circle(0, 0, 4);
+  } else if (prop.type === "tallGrass") {
+    ctx.strokeStyle = "#72d069";
+    ctx.lineWidth = 2;
+    for (let i = -4; i <= 4; i += 2) {
+      line(i * 2, 10, i * 3, -8 - Math.abs(i) * 2);
+    }
   } else if (prop.type === "mushroom") {
     ctx.fillStyle = "#d7e9ff";
     ctx.fillRect(-5, -2, 10, 18);
@@ -812,6 +1138,59 @@ function drawProp(prop, biomeId) {
     ctx.beginPath();
     ctx.ellipse(0, 0, 25, 12, 0.25, 0, Math.PI * 2);
     ctx.fill();
+  } else if (prop.type === "snowRock") {
+    ctx.fillStyle = "#d7edf3";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 22, 13, -0.12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(-12, -10, 22, 5);
+  } else if (prop.type === "iceCrystal" || prop.type === "crystalCluster") {
+    const colors = prop.type === "iceCrystal" ? ["#d4fbff", "#8edfff"] : ["#b28dff", "#7df1ff"];
+    for (let i = -1; i <= 1; i += 1) {
+      ctx.fillStyle = colors[(i + 1) % 2];
+      ctx.beginPath();
+      ctx.moveTo(i * 10, -28 + Math.abs(i) * 5);
+      ctx.lineTo(i * 10 - 8, 10);
+      ctx.lineTo(i * 10 + 9, 9);
+      ctx.closePath();
+      ctx.fill();
+    }
+  } else if (prop.type === "poisonVent") {
+    ctx.fillStyle = "#4b5341";
+    ctx.fillRect(-13, 0, 26, 12);
+    ctx.fillStyle = "rgba(148, 242, 92, 0.4)";
+    circle(-6, -5, 8);
+    circle(6, -9, 10);
+  } else if (prop.type === "ashPile") {
+    ctx.fillStyle = "#8d8982";
+    ctx.beginPath();
+    ctx.ellipse(0, 5, 26, 10, 0.05, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#5d5954";
+    circle(-7, 1, 5);
+    circle(9, 2, 4);
+  } else if (prop.type === "burnedTree") {
+    ctx.fillStyle = "#2f2926";
+    ctx.fillRect(-5, -26, 10, 44);
+    ctx.strokeStyle = "#2f2926";
+    ctx.lineWidth = 4;
+    line(0, -12, -16, -28);
+    line(0, -18, 16, -34);
+    ctx.fillStyle = "rgba(255, 116, 56, 0.35)";
+    circle(0, 12, 8);
+  } else if (prop.type === "deadPlant") {
+    ctx.strokeStyle = "#8d806e";
+    ctx.lineWidth = 3;
+    line(0, 12, 0, -12);
+    line(0, -4, -12, -14);
+    line(0, 0, 13, -10);
+  } else if (prop.type === "lavaCrack") {
+    ctx.strokeStyle = "#ff7438";
+    ctx.lineWidth = 5;
+    line(-22, 8, -8, -4);
+    line(-8, -4, 4, 3);
+    line(4, 3, 20, -10);
   } else if (prop.type === "bone") {
     ctx.fillStyle = "#f1e4ca";
     ctx.fillRect(-22, -4, 44, 8);
@@ -850,26 +1229,54 @@ function drawProp(prop, biomeId) {
 }
 
 function drawHazard(hazard) {
-  ctx.fillStyle = "rgba(42, 230, 122, 0.28)";
-  ctx.beginPath();
-  ctx.ellipse(hazard.x, hazard.y, hazard.radius * 1.25, hazard.radius * 0.7, 0.2, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.save();
+  ctx.translate(hazard.x, hazard.y);
+  if (hazard.type === "poisonGas") {
+    ctx.fillStyle = "rgba(142, 241, 94, 0.18)";
+    circle(0, 0, hazard.radius);
+    ctx.fillStyle = "rgba(182, 255, 126, 0.22)";
+    circle(-hazard.radius * 0.25, -6, hazard.radius * 0.5);
+    circle(hazard.radius * 0.22, 7, hazard.radius * 0.42);
+  } else if (hazard.type === "ice") {
+    ctx.fillStyle = "rgba(191, 245, 255, 0.30)";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, hazard.radius * 1.35, hazard.radius * 0.58, -0.18, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (hazard.type === "lavaCrack") {
+    ctx.strokeStyle = "rgba(255, 116, 56, 0.82)";
+    ctx.lineWidth = 7;
+    line(-hazard.radius, 0, -hazard.radius * 0.25, -8);
+    line(-hazard.radius * 0.25, -8, hazard.radius * 0.2, 6);
+    line(hazard.radius * 0.2, 6, hazard.radius, -5);
+  } else if (hazard.type === "spikes") {
+    ctx.fillStyle = "rgba(238, 222, 185, 0.72)";
+    for (let i = 0; i < 6; i += 1) {
+      const angle = (Math.PI * 2 * i) / 6;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * 4, Math.sin(angle) * 4);
+      ctx.lineTo(Math.cos(angle - 0.18) * hazard.radius, Math.sin(angle - 0.18) * hazard.radius);
+      ctx.lineTo(Math.cos(angle + 0.18) * hazard.radius, Math.sin(angle + 0.18) * hazard.radius);
+      ctx.fill();
+    }
+  } else if (hazard.type === "windStream") {
+    ctx.strokeStyle = "rgba(210, 240, 255, 0.34)";
+    ctx.lineWidth = 3;
+    for (let i = -2; i <= 2; i += 1) {
+      line(-hazard.windX * hazard.radius + hazard.windY * i * 9, -hazard.windY * hazard.radius - hazard.windX * i * 9,
+        hazard.windX * hazard.radius + hazard.windY * i * 9, hazard.windY * hazard.radius - hazard.windX * i * 9);
+    }
+  } else {
+    ctx.fillStyle = "rgba(42, 230, 122, 0.28)";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, hazard.radius * 1.25, hazard.radius * 0.7, 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawResource(resource) {
   if (resource.collected) return;
-  const colors = {
-    Wood: "#8c5b31",
-    Leaves: "#7ddb56",
-    Stone: "#a3a7ad",
-    "Mushroom Caps": "#e978e8",
-    Slime: "#56e680",
-    "Glow Spores": "#7deeff",
-    Bone: "#efe1bd",
-    Sandstone: "#d8bd7a",
-    "Dry Wood": "#a66b3f"
-  };
-  ctx.fillStyle = colors[resource.type] || "#ffffff";
+  ctx.fillStyle = RESOURCE_COLORS[resource.type] || "#ffffff";
   circle(resource.x, resource.y, 8);
   ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
   ctx.stroke();
@@ -877,11 +1284,12 @@ function drawResource(resource) {
 
 function drawChest(chest) {
   const opened = state.openedChests.has(chest.id);
+  const biome = state.world.getBiomeAt(chest.x, chest.y);
   ctx.save();
   ctx.translate(chest.x, chest.y);
   ctx.fillStyle = opened ? "#75685b" : "#a05b2a";
   ctx.fillRect(-18, -13, 36, 26);
-  ctx.fillStyle = opened ? "#3a312c" : BIOMES[chest.biomeId].accent;
+  ctx.fillStyle = opened ? "#3a312c" : biome.accent;
   ctx.fillRect(-18, -13, 36, 7);
   ctx.fillStyle = "#2a1b15";
   ctx.fillRect(-4, -2, 8, 9);
@@ -898,6 +1306,40 @@ function drawMarkers() {
     ctx.fill();
     ctx.strokeStyle = "#503c1a";
     line(marker.x, marker.y - 30, marker.x, marker.y + 18);
+  }
+}
+
+function drawDroppedItems() {
+  for (const item of state.droppedItems) {
+    ctx.save();
+    ctx.translate(item.x, item.y);
+    const bob = Math.sin(performance.now() / 260 + item.x) * 2;
+    ctx.translate(0, bob);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+    ctx.beginPath();
+    ctx.ellipse(0, 12, item.radius + 5, 5, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = item.color;
+    if (item.itemType === "weapon") {
+      ctx.rotate(-0.65);
+      ctx.fillRect(-3, -16, 6, 28);
+      ctx.fillRect(-10, -4, 20, 5);
+    } else if (item.itemType === "placeable") {
+      ctx.beginPath();
+      ctx.moveTo(0, -15);
+      ctx.lineTo(10, 4);
+      ctx.lineTo(0, 0);
+      ctx.fill();
+      ctx.strokeStyle = "#503c1a";
+      line(0, -15, 0, 13);
+    } else {
+      circle(0, 0, item.radius);
+    }
+    ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
+    ctx.font = "10px sans-serif";
+    ctx.textAlign = "center";
+    if (item.quantity > 1) ctx.fillText(String(item.quantity), 0, -13);
+    ctx.restore();
   }
 }
 
@@ -929,7 +1371,7 @@ function drawPlayer() {
   circle(0, 0, player.radius);
   ctx.fillStyle = "#ffdf6e";
   circle(aim.x * 16, aim.y * 16, 6);
-  ctx.strokeStyle = activeWeapon().color;
+  ctx.strokeStyle = activeItem()?.color || "#cdd6df";
   ctx.lineWidth = 5;
   line(aim.x * 12, aim.y * 12, aim.x * 32, aim.y * 32);
   ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
@@ -989,32 +1431,35 @@ function drawLighting() {
     w: state.viewport.width,
     h: state.viewport.height
   };
-  const tint = biome.id === "mushroom"
-    ? "rgba(26, 12, 46, 0.30)"
-    : biome.id === "desert"
-      ? "rgba(83, 49, 20, 0.18)"
-      : "rgba(12, 28, 23, 0.14)";
+  const tint = biome.lighting?.tint || "rgba(12, 28, 23, 0.14)";
 
   ctx.save();
   ctx.fillStyle = tint;
   ctx.fillRect(visible.x, visible.y, visible.w, visible.h);
   ctx.globalCompositeOperation = "lighter";
-  addLight(state.player.x, state.player.y, 190, "rgba(255, 238, 176, 0.28)");
+  addLight(state.player.x, state.player.y, 190, biome.lighting?.playerLight || "rgba(255, 238, 176, 0.28)");
 
   for (const chunk of state.world.nearbyChunks(state.player.x, state.player.y, 2)) {
     for (const prop of chunk.props) {
-      if (prop.type === "mushroom") addLight(prop.x, prop.y, 86, "rgba(255, 105, 216, 0.18)");
-      if (prop.type === "spore") addLight(prop.x, prop.y, 70, "rgba(102, 239, 239, 0.18)");
+      const glow = chunk.biomeProfile.lighting?.glow || 1;
+      if (prop.type === "mushroom") addLight(prop.x, prop.y, 86 * glow, "rgba(255, 105, 216, 0.18)");
+      if (prop.type === "spore") addLight(prop.x, prop.y, 70 * glow, "rgba(102, 239, 239, 0.18)");
       if (prop.type === "slimePuddle") addLight(prop.x, prop.y, 74, "rgba(84, 232, 128, 0.14)");
       if (prop.type === "flower") addLight(prop.x, prop.y, 42, "rgba(255, 228, 91, 0.11)");
+      if (prop.type === "iceCrystal") addLight(prop.x, prop.y, 78 * glow, "rgba(150, 235, 255, 0.18)");
+      if (prop.type === "crystalCluster") addLight(prop.x, prop.y, 104 * glow, "rgba(146, 119, 255, 0.22)");
+      if (prop.type === "lavaCrack" || prop.type === "burnedTree") addLight(prop.x, prop.y, 88, "rgba(255, 104, 49, 0.18)");
     }
     for (const hazard of chunk.hazards) {
-      addLight(hazard.x, hazard.y, hazard.radius * 2.2, "rgba(92, 239, 132, 0.13)");
+      if (hazard.type === "lavaCrack") addLight(hazard.x, hazard.y, hazard.radius * 2.5, "rgba(255, 94, 43, 0.25)");
+      else if (hazard.type === "poisonGas") addLight(hazard.x, hazard.y, hazard.radius * 2.1, "rgba(142, 241, 94, 0.14)");
+      else if (hazard.type === "ice") addLight(hazard.x, hazard.y, hazard.radius * 1.8, "rgba(185, 244, 255, 0.12)");
+      else addLight(hazard.x, hazard.y, hazard.radius * 2.2, "rgba(92, 239, 132, 0.13)");
     }
   }
 
   for (const projectile of [...state.projectiles, ...state.enemyProjectiles]) {
-    addLight(projectile.x, projectile.y, projectile.effect === "fireTooth" ? 115 : 72, projectile.color + "88");
+    addLight(projectile.x, projectile.y, (projectile.effect === "fireTooth" ? 115 : 72) * (projectile.glow || 1), projectile.color + "88");
   }
   for (const effect of state.effects) {
     if (effect.type === "spore") addLight(effect.x, effect.y, effect.radius * 1.45, "rgba(184, 91, 226, 0.16)");
@@ -1034,26 +1479,199 @@ function addLight(x, y, radius, color) {
   ctx.fill();
 }
 
+function drawWeatherOverlay() {
+  if (!state.started) return;
+  const biome = currentBiome();
+  const weather = biome.weather;
+  const visibility = biome.gameplayModifiers?.visibility || 1;
+  const time = performance.now() / 1000;
+  ctx.save();
+  if (visibility < 0.92) {
+    ctx.fillStyle = `rgba(220, 228, 230, ${Math.min(0.22, (1 - visibility) * 0.46)})`;
+    ctx.fillRect(0, 0, state.viewport.width, state.viewport.height);
+  }
+  if (weather === "snowstorm") {
+    ctx.strokeStyle = "rgba(235, 250, 255, 0.55)";
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 48; i += 1) {
+      const x = (i * 79 + time * 72) % state.viewport.width;
+      const y = (i * 41 + time * 170) % state.viewport.height;
+      line(x, y, x - 13, y + 18);
+    }
+  } else if (weather === "dust storm" || weather === "heatwave") {
+    ctx.strokeStyle = weather === "dust storm" ? "rgba(230, 194, 124, 0.34)" : "rgba(255, 198, 117, 0.22)";
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 34; i += 1) {
+      const x = (i * 113 + time * 115) % state.viewport.width;
+      const y = (i * 37 + Math.sin(time + i) * 18) % state.viewport.height;
+      line(x, y, x + 42, y + 5);
+    }
+  } else if (weather === "glowing spores") {
+    ctx.fillStyle = "rgba(120, 244, 255, 0.28)";
+    for (let i = 0; i < 32; i += 1) {
+      const x = (i * 97 + Math.sin(time + i) * 20) % state.viewport.width;
+      const y = (i * 59 + time * 18) % state.viewport.height;
+      circle(x, y, 2 + (i % 3));
+    }
+  } else if (weather === "high wind") {
+    ctx.strokeStyle = "rgba(215, 236, 255, 0.24)";
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 28; i += 1) {
+      const x = (i * 131 + time * 180) % state.viewport.width;
+      const y = (i * 53 + time * 22) % state.viewport.height;
+      line(x, y, x + biome.wind.x * 58, y + biome.wind.y * 22);
+    }
+  } else if (weather === "fog") {
+    ctx.fillStyle = "rgba(210, 216, 222, 0.13)";
+    for (let i = 0; i < 8; i += 1) {
+      ctx.beginPath();
+      ctx.ellipse(
+        ((i * 173 + time * 16) % (state.viewport.width + 160)) - 80,
+        70 + i * 64,
+        130,
+        26,
+        0,
+        0,
+        Math.PI * 2
+      );
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+function renderHotbar() {
+  if (!hotbarEl) return;
+  hotbarEl.innerHTML = "";
+  state.player.hotbar.forEach((stack, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `hotbar-slot${index === state.player.selectedHotbar ? " selected" : ""}`;
+    button.dataset.slot = String(index);
+    const number = document.createElement("span");
+    number.className = "slot-number";
+    number.textContent = String(index + 1);
+    button.append(number);
+    if (stack) {
+      const def = itemDef(stack.id);
+      const icon = document.createElement("span");
+      icon.className = "slot-icon";
+      icon.style.background = def.color;
+      const name = document.createElement("span");
+      name.className = "slot-name";
+      name.textContent = def.name;
+      button.append(icon, name);
+      if (stack.quantity > 1) {
+        const qty = document.createElement("span");
+        qty.className = "slot-qty";
+        qty.textContent = String(stack.quantity);
+        button.append(qty);
+      }
+    }
+    button.addEventListener("click", () => {
+      state.player.selectedHotbar = index;
+      renderHotbar();
+    });
+    hotbarEl.append(button);
+  });
+}
+
+function renderInventoryPanel() {
+  if (!inventoryPanel || !inventoryGrid || !inventoryHotbar || !inventoryDetails) return;
+  inventoryGrid.innerHTML = "";
+  inventoryHotbar.innerHTML = "";
+
+  state.player.inventorySlots.forEach((stack, index) => {
+    inventoryGrid.append(renderInventorySlot(stack, index, "inventory"));
+  });
+  state.player.hotbar.forEach((stack, index) => {
+    inventoryHotbar.append(renderInventorySlot(stack, index, "hotbar"));
+  });
+
+  const selected = selectedHotbarStack();
+  const def = selected ? itemDef(selected.id) : null;
+  inventoryDetails.textContent = def
+    ? `Selected: ${def.name} x${selected.quantity} | ${def.type} | ${def.description || ""}`
+    : "Selected: empty hotbar slot";
+}
+
+function renderInventorySlot(stack, index, source) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `inventory-slot${source === "hotbar" && index === state.player.selectedHotbar ? " selected" : ""}`;
+  button.dataset.slot = String(index);
+  if (stack) {
+    const def = itemDef(stack.id);
+    const icon = document.createElement("span");
+    icon.className = "slot-icon";
+    icon.style.background = def.color;
+    const name = document.createElement("span");
+    name.className = "slot-name";
+    name.textContent = def.name;
+    button.append(icon, name);
+    if (stack.quantity > 1) {
+      const qty = document.createElement("span");
+      qty.className = "slot-qty";
+      qty.textContent = String(stack.quantity);
+      button.append(qty);
+    }
+  }
+  button.addEventListener("click", () => {
+    if (source === "hotbar") {
+      state.player.selectedHotbar = index;
+    } else if (stack) {
+      const selected = state.player.selectedHotbar;
+      const oldHotbar = state.player.hotbar[selected];
+      state.player.hotbar[selected] = stack;
+      state.player.inventorySlots[index] = oldHotbar;
+      recountResourceInventory();
+    }
+    renderHotbar();
+    renderInventoryPanel();
+  });
+  return button;
+}
+
+function setInventoryOpen(open) {
+  state.inventoryOpen = open;
+  inventoryPanel?.classList.toggle("hidden", !open);
+  if (open) renderInventoryPanel();
+}
+
 function updateHud() {
   const player = state.player;
   const weapon = activeWeapon();
+  const biome = currentBiome();
+  const held = activeItem();
+  recountResourceInventory();
   healthText.textContent = `Health ${Math.ceil(player.hp)} / ${player.maxHp}`;
   levelText.textContent = `Level ${player.level} | XP ${Math.floor(player.xp)} / ${player.xpNext}`;
-  weaponText.textContent = `${weapon.name} (${player.activeWeaponIndex + 1}/${player.weaponIds.length})`;
+  weaponText.textContent = `Held: ${held?.name || "Empty Hand"} | Biome: ${biome.name}`;
   resourceText.textContent = RESOURCES.filter((name) => player.inventory[name] > 0)
     .map((name) => `${name}: ${player.inventory[name]}`)
     .join(" | ") || "Resources: none yet";
   const chunk = state.world.chunkCoords(player.x, player.y);
   debugOverlay.textContent = [
-    `Biome: ${currentBiome().name}`,
+    `Biome: ${biome.name}`,
+    `Parts: ${biome.partLabels.join(" / ")}`,
+    `Temperature: ${biome.temperature} | Climate: ${biome.climate}`,
+    `Gravity: ${biome.gravity.label} (${biome.gravity.level})`,
+    `Wind: ${Math.round(biome.wind.strength)} @ ${biome.wind.x.toFixed(2)}, ${biome.wind.y.toFixed(2)}`,
+    `Density: creatures ${biome.creatureDensity.toFixed(2)} | plants ${biome.plantDensity.toFixed(2)} | resources ${biome.resourceDensity.toFixed(2)}`,
+    `Modifiers: speed ${biome.gameplayModifiers.playerSpeed.toFixed(2)} | inertia ${biome.gameplayModifiers.inertia.toFixed(2)} | projectile ${biome.gameplayModifiers.projectileRange.toFixed(2)}x`,
+    `Hazards: ${biome.hazards.length ? biome.hazards.join(", ") : "none"}`,
+    `Creature bias: ${Object.keys(biome.creatureRules.bias).join(", ") || "none"}`,
     `Position: ${Math.round(player.x)}, ${Math.round(player.y)}`,
     `Chunk: ${chunk.cx}, ${chunk.cy}`,
-    `Weapon: ${weapon.name}`,
+    `Held: ${held?.name || "Empty Hand"}`,
     `Multiplayer: ${state.connected ? "connected" : "offline"} ${state.snapshot ? state.snapshot.playerCount + " players" : ""}`,
     `World seed: ${state.worldSeed}`,
     `Opened chests: ${state.openedChests.size}`,
-    `Defeated creatures: ${state.deadCreatures.size}`
+    `Defeated creatures: ${state.deadCreatures.size}`,
+    `Dropped items: ${state.droppedItems.length}`
   ].join("\n");
+  renderHotbar();
+  if (state.inventoryOpen) renderInventoryPanel();
 }
 
 function renderRecipes() {
@@ -1119,17 +1737,34 @@ window.addEventListener("keydown", (event) => {
     return;
   }
   if (event.code === "Escape") {
+    if (state.inventoryOpen) {
+      setInventoryOpen(false);
+      return;
+    }
     returnToMenu();
     return;
   }
   input.keys.add(event.code);
   if (!state.started) return;
+  if (event.code === "KeyR") {
+    setInventoryOpen(!state.inventoryOpen);
+    return;
+  }
   if (event.code === "Space") input.attackQueued = true;
   if (event.code === "KeyE") input.interactQueued = true;
+  if (event.code === "KeyQ") {
+    dropHotbarSlot(state.player.selectedHotbar);
+    return;
+  }
   if (event.code === "KeyC") craftingPanel.classList.toggle("hidden");
-  if (/^Digit[1-5]$/.test(event.code)) {
+  if (/^Digit[1-9]$/.test(event.code)) {
     const index = Number(event.code.slice(-1)) - 1;
-    if (state.player.weaponIds[index]) state.player.activeWeaponIndex = index;
+    if (event.shiftKey || input.mouse.down) {
+      dropHotbarSlot(index, event.shiftKey);
+    } else {
+      state.player.selectedHotbar = index;
+      renderHotbar();
+    }
   }
 });
 window.addEventListener("keyup", (event) => input.keys.delete(event.code));
@@ -1139,8 +1774,15 @@ canvas.addEventListener("mousemove", (event) => {
 });
 canvas.addEventListener("mousedown", () => {
   if (!state.started) return;
+  for (let index = 0; index < 9; index += 1) {
+    if (input.keys.has(`Digit${index + 1}`)) {
+      dropHotbarSlot(index);
+      return;
+    }
+  }
   input.mouse.down = true;
   input.attackQueued = true;
+  input.pickupQueued = true;
 });
 window.addEventListener("mouseup", () => {
   input.mouse.down = false;

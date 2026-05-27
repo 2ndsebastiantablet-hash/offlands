@@ -1,5 +1,5 @@
 import { BIOMES, CREATURE_PARTS } from "./data.js";
-import { choose, maybe } from "./random.js";
+import { maybe } from "./random.js";
 
 const OPTIONAL_CHANCE = {
   head: 0.72,
@@ -9,19 +9,19 @@ const OPTIONAL_CHANCE = {
   skin: 0.38
 };
 
-export function generateCreatureSpec(rng, biomeId, id, x, y) {
-  const biome = BIOMES[biomeId] || BIOMES.wildlands;
+export function generateCreatureSpec(rng, biomeProfileOrId, id, x, y) {
+  const biome = normalizeBiome(biomeProfileOrId);
   const parts = {
-    body: choose(rng, weightedBodies(rng, biome))
+    body: weightedPick(rng, CREATURE_PARTS.body, biome.creatureRules.bias)
   };
 
   for (const category of ["head", "eye", "arms", "movement", "skin"]) {
-    if (maybe(rng, OPTIONAL_CHANCE[category])) {
-      parts[category] = choose(rng, weightedParts(category, biome));
+    if (maybe(rng, optionalChance(category, biome))) {
+      parts[category] = weightedPick(rng, CREATURE_PARTS[category], biome.creatureRules.bias);
     }
   }
 
-  const stats = calculateStats(parts, biomeId);
+  const stats = calculateStats(parts, biome);
   return {
     id,
     x,
@@ -41,33 +41,69 @@ export function generateCreatureSpec(rng, biomeId, id, x, y) {
     dead: false,
     name: nameCreature(parts),
     parts,
-    biomeId,
+    biomeId: biome.legacyId,
+    biomeName: biome.name,
+    biomeProfileId: biome.id,
     ...stats,
     hp: stats.maxHp
   };
 }
 
-function weightedBodies(rng, biome) {
-  if (biome.id === "desert" && rng() < 0.62) return [CREATURE_PARTS.body[1]];
-  if (biome.id === "mushroom" && rng() < 0.58) return [CREATURE_PARTS.body[0]];
-  return CREATURE_PARTS.body;
+function normalizeBiome(biomeProfileOrId) {
+  if (typeof biomeProfileOrId === "object" && biomeProfileOrId?.creatureRules) return biomeProfileOrId;
+  const legacy = BIOMES[biomeProfileOrId] || BIOMES.wildlands;
+  return {
+    ...legacy,
+    legacyId: legacy.id,
+    creatureRules: { bias: {}, aggressionMod: legacy.id === "desert" ? 1.15 : 1, damageMod: 1, speedMod: 1, detectionMod: 1 }
+  };
 }
 
-function weightedParts(category, biome) {
-  const parts = CREATURE_PARTS[category];
-  if (biome.id === "mushroom" && category === "head") return [parts[1], parts[1], parts[0]];
-  if (biome.id === "mushroom" && category === "eye") return [parts[0], parts[0], parts[1]];
-  if (biome.id === "desert" && category === "head") return [parts[0], parts[0], parts[1]];
-  if (biome.id === "desert" && category === "movement") return [parts[1], parts[1], parts[0]];
-  return parts;
+function optionalChance(category, biome) {
+  const bias = biome.creatureRules.bias || {};
+  let chance = OPTIONAL_CHANCE[category];
+  if (category === "arms") chance *= bias.claws || 1;
+  if (category === "eye") chance *= Math.max(bias.oneEye || 1, bias.threeEyes || 1);
+  if (category === "movement") chance *= Math.max(bias.wings || 1, bias.threeFeet || 1);
+  if (category === "skin") chance *= bias.armorSkin || 1;
+  if (category === "head") chance *= Math.max(bias.skullHead || 1, bias.mushroomHead || 1);
+  if (bias.peaceful) chance *= 0.82;
+  return Math.max(0.08, Math.min(0.96, chance));
 }
 
-export function calculateStats(parts, biomeId) {
+function weightedPick(rng, parts, bias) {
+  const total = parts.reduce((sum, part) => sum + partWeight(part, bias), 0);
+  let roll = rng() * total;
+  for (const part of parts) {
+    roll -= partWeight(part, bias);
+    if (roll <= 0) return part;
+  }
+  return parts[parts.length - 1];
+}
+
+function partWeight(part, bias = {}) {
+  const multipliers = {
+    blobBody: bias.blobBody,
+    bugBody: bias.bugBody,
+    skullHead: bias.skullHead,
+    mushroomHead: bias.mushroomHead,
+    oneEye: bias.oneEye,
+    threeEyes: bias.threeEyes,
+    claws: bias.claws,
+    wings: bias.wings,
+    threeFeet: bias.threeFeet,
+    armorSkin: bias.armorSkin
+  };
+  return Math.max(0.05, multipliers[part.id] || 1);
+}
+
+export function calculateStats(parts, biomeProfileOrId) {
+  const biome = normalizeBiome(biomeProfileOrId);
   let maxHp = parts.body.health;
   let speed = parts.body.speed;
   let damage = parts.body.damage;
   let defense = 0;
-  let detection = biomeId === "desert" ? 240 : 220;
+  let detection = biome.legacyId === "desert" ? 240 : 220;
   let aggression = 1;
 
   for (const part of Object.values(parts)) {
@@ -80,17 +116,26 @@ export function calculateStats(parts, biomeId) {
     aggression *= part.aggression || 1;
   }
 
+  const rules = biome.creatureRules || {};
+  if (rules.bias?.aggressive) aggression *= rules.bias.aggressive;
+  if (rules.bias?.peaceful) aggression *= 0.75;
+  speed *= rules.speedMod || 1;
+  damage *= rules.damageMod || 1;
+  detection *= rules.detectionMod || 1;
+  aggression *= rules.aggressionMod || 1;
+
   return {
     maxHp: Math.max(16, Math.round(maxHp)),
-    speed: Math.max(30, speed),
-    damage: Math.max(4, damage),
+    speed: Math.max(26, Math.round(speed)),
+    damage: Math.max(4, Math.round(damage)),
     defense: Math.min(0.55, defense),
-    detection,
+    detection: Math.round(detection),
     aggression,
     flying: Boolean(parts.movement?.flying),
     laser: Boolean(parts.eye?.laser),
     spore: Boolean(parts.head?.spore),
     clawed: Boolean(parts.arms?.melee),
+    drift: rules.drift || 0,
     xp: Math.round(12 + maxHp * 0.32 + damage)
   };
 }
@@ -131,8 +176,8 @@ export function drawCreature(ctx, creature, sx, sy, scale = 1) {
     ellipse(ctx, 0, 2, 22, 15, 0);
     ctx.fillStyle = "#1b2230";
     for (let i = -1; i <= 1; i += 1) {
-      rect(ctx, -22, i * 8, 13, 3, 2);
-      rect(ctx, 9, i * 8, 13, 3, 2);
+      rect(ctx, -22, i * 8, 13, 3);
+      rect(ctx, 9, i * 8, 13, 3);
     }
   } else {
     blob(ctx, 0, 2, 24, 20);

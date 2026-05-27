@@ -28,9 +28,13 @@ Controls:
 
 - `WASD` or arrow keys: move
 - Mouse: aim
-- Left click or `Space`: attack
-- `E`: pick up resources or open nearby chests
-- `1`-`5`: switch weapons
+- Left click or `Space`: use the selected hotbar item
+- `E`: pick up nearby items/resources or open nearby chests
+- Click a nearby dropped item: pick it up
+- `1`-`9`: select hotbar slot
+- Number key + mouse click: drop that numbered hotbar item
+- `Shift` + number or `Q`: drop from the hotbar
+- `R`: toggle full inventory
 - `C`: toggle crafting
 - `F3`: toggle debug overlay
 
@@ -62,12 +66,13 @@ Used/adapted pieces:
 - top-down movement and mouse aim
 - public/private/code multiplayer lobbies with WebSocket player sync
 - chunked deterministic world generation from a shared seed
-- Green Wildlands, Purple Mushroom Field, and Bone Desert biomes
-- random creatures assembled from 10 mechanical/visual parts
+- modular biome profiles built from terrain, climate, gravity, life density, hazard, creature, resource, and lighting parts
+- biome gameplay effects for wind, low/heavy/zero gravity, weather visibility, resource density, hazards, creature density, creature part bias, movement, and projectile range
+- random creatures assembled from 10 mechanical/visual parts, now biased by biome rules
 - melee, ranged, laser, spore, burn, slow, and knockback combat hooks
 - chests with biome-tinted loot and shared opened state
 - five weapons: Stick Sword, Bone Club, Slime Gun, Eye Wand, Fire Tooth
-- inventory/hotbar, resources, crafting, XP, level ups, and optional debug overlay
+- Minecraft-style 9-slot hotbar, full inventory panel, stacked resources/consumables, item dropping, dropped item pickup, crafting, XP, level ups, and optional debug overlay
 
 ## Cloudflare Notes
 
@@ -94,5 +99,6 @@ npm run deploy
 
 - Enemy AI is client-side for the prototype. Creature deaths are synced through the shared room state, but full authoritative enemy simulation is a later step.
 - Chest opened state is synced and persisted per room, but loot granting is local to the opener.
+- Dropped items and each player's full inventory are local for this pass; the data shape is ready to sync later.
 - Multiplayer uses template lobbies, not accounts, matchmaking, or persistent profiles.
 - Art is intentionally simple canvas shapes with no copyrighted assets.
