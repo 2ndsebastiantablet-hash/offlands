@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Offlands</title>
+  <link rel="stylesheet" href="./public/style.css" />
+  <script type="module" src="./public/src/main.js"></script>
+</head>
+<body>
+  <main id="game-shell">
+    <canvas id="game" width="1024" height="576"></canvas>
+    <section id="mainMenu" class="menu-screen">
+      <div class="menu-card">
+        <h1>Offlands</h1>
+        <p class="tagline">Explore strange worlds. Fight random creatures. Craft weird weapons.</p>
+        <button id="playButton" class="primary-action" type="button">Play</button>
+        <div class="menu-divider"></div>
+        <div class="panel-title">Multiplayer</div>
+        <div class="menu-grid">
+          <input id="nameInput" maxlength="18" aria-label="Player name" />
+          <button id="joinPublicButton" type="button">Join Public</button>
+          <button id="createPrivateButton" type="button">Private Lobby</button>
+          <input id="codeInput" maxlength="6" placeholder="CODE" aria-label="Private code" />
+          <button id="joinCodeButton" type="button">Join Code</button>
+          <button id="leaveButton" type="button">Leave</button>
+        </div>
+        <div id="multiplayerStatus" class="tiny">Solo mode ready. Join a lobby before Play for multiplayer.</div>
+      </div>
+    </section>
+    <section id="hud" aria-label="Game status">
+      <div class="hud-row">
+        <strong id="healthText">Health 100 / 100</strong>
+        <span id="levelText">Level 1 | XP 0 / 50</span>
+        <span id="weaponText">Stick Sword</span>
+      </div>
+      <div id="resourceText" class="resource-line"></div>
+      <div id="statusText" class="status-line">Loading Offlands...</div>
+    </section>
+    <section id="craftingPanel" class="panel hidden">
+      <div class="panel-title">Crafting</div>
+      <div id="recipeList"></div>
+    </section>
+    <section id="helpPanel" class="panel">
+      <div class="panel-title">Controls</div>
+      <div class="tiny">WASD move | Mouse aim | Click/Space attack | E interact/pick up | 1-5 weapons | C craft | Esc menu | F3 debug</div>
+    </section>
+    <pre id="debugOverlay"></pre>
+  </main>
+</body>
+</html>
