@@ -554,16 +554,38 @@ function scaledDamage(amount) {
   return Math.round(amount * state.player.damageBonus);
 }
 
-function damageCreature(creature, amount, weapon, dir) {
+function damageCreature(creature, amount, weapon, dir, source = "player") {
+  if (creature.profile?.isTamed && source === "player") {
+    setStatus(`${creature.profile.name} is on your side.`, 1);
+    return;
+  }
+  if (creature.profile?.isInvincible) {
+    creature.hurtTimer = 0.18;
+    addFloatingText("immune", creature.x, creature.y - 24, "#d9d4ff");
+    alertHive(creature);
+    return;
+  }
+  if (source === "player" && creature.profile?.isFriendly) {
+    creature.profile.isFriendly = false;
+    creature.profile.temperament = "Scared";
+    creature.profile.behaviorType = "scared";
+  }
+  if (source === "player" && ["neutral", "scared"].includes(creature.profile?.behaviorType)) {
+    creature.profile.isFriendly = false;
+    creature.profile.behaviorType = "hostile";
+    creature.profile.temperament = "Hostile";
+  }
   const finalDamage = Math.max(1, Math.round(amount * (1 - creature.defense)));
   const knockbackScale = currentBiome().gameplayModifiers?.knockback || 1;
   creature.hp -= finalDamage;
   creature.hurtTimer = 0.18;
-  creature.x += dir.x * (weapon.knockback || 55) * 0.045 * knockbackScale;
-  creature.y += dir.y * (weapon.knockback || 55) * 0.045 * knockbackScale;
+  const knockback = (weapon.knockback || 55) * (1 - (creature.knockbackResistance || 0));
+  creature.x += dir.x * knockback * 0.045 * knockbackScale;
+  creature.y += dir.y * knockback * 0.045 * knockbackScale;
   if (weapon.id === "slimeGun") creature.slowTimer = 2.2;
   if (weapon.id === "fireTooth") creature.burnTimer = 3;
   addFloatingText(`-${finalDamage}`, creature.x, creature.y - 24, "#fff1a8");
+  alertHive(creature);
   if (creature.hp <= 0) killCreature(creature);
 }
 
@@ -571,10 +593,17 @@ function killCreature(creature) {
   if (state.deadCreatures.has(creature.id)) return;
   creature.dead = true;
   state.deadCreatures.add(creature.id);
-  const biome = state.world.getBiomeAt(creature.x, creature.y);
   const rng = seeded(`${state.worldSeed}:drop:${creature.id}`);
-  const resource = biome.resources[Math.floor(rng() * biome.resources.length)];
-  spawnDroppedItem(resource, 1 + Math.floor(rng() * 2), creature.x, creature.y);
+  const lootTable = creature.profile?.lootTable;
+  const resources = lootTable?.resources?.length ? lootTable.resources : state.world.getBiomeAt(creature.x, creature.y).resources;
+  const resource = resources[Math.floor(rng() * resources.length)];
+  const min = lootTable?.min || 1;
+  const max = lootTable?.max || 2;
+  spawnDroppedItem(resource, min + Math.floor(rng() * Math.max(1, max - min + 1)), creature.x, creature.y);
+  if (lootTable?.rareWeaponChance && rng() < lootTable.rareWeaponChance) {
+    const weaponId = creature.profile?.bodyType === "crystal" ? "eyeWand" : creature.profile?.bodyType === "boneBeast" ? "boneClub" : "stickSword";
+    spawnDroppedItem(weaponId, 1, creature.x + 18, creature.y + 10);
+  }
   gainXp(creature.xp);
   addFloatingText(`+${creature.xp} XP`, creature.x, creature.y - 42, "#a7ff8b");
   sendWorldEvent("creature_killed", { creatureId: creature.id });
@@ -592,78 +621,241 @@ function updateCreatures(chunk, dt) {
       continue;
     }
     if (creature.dead) continue;
-    creature.hurtTimer = Math.max(0, creature.hurtTimer - dt);
-    creature.slowTimer = Math.max(0, creature.slowTimer - dt);
+    updateCreatureTimers(creature, dt);
     if (creature.burnTimer > 0) {
       creature.burnTimer -= dt;
       creature.hp -= 4 * dt;
       if (creature.hp <= 0) killCreature(creature);
     }
 
-    const toPlayer = { x: state.player.x - creature.x, y: state.player.y - creature.y };
-    const playerDist = Math.hypot(toPlayer.x, toPlayer.y);
-    const speed = creature.speed * (creature.slowTimer > 0 ? 0.48 : 1);
-    let move = { x: 0, y: 0 };
-
-    if (playerDist < creature.detection && state.player.respawnTimer <= 0) {
-      move = normalize(toPlayer.x, toPlayer.y);
+    if (creature.profile?.isTamed) {
+      updateTamedCreature(creature, chunk, biome, dt);
     } else {
-      creature.wanderTimer -= dt;
-      if (creature.wanderTimer <= 0) {
-        creature.wanderTimer = 1 + Math.random() * 2;
-        creature.wanderAngle += -1.2 + Math.random() * 2.4;
-      }
-      move = { x: Math.cos(creature.wanderAngle), y: Math.sin(creature.wanderAngle) };
+      updateWildCreature(creature, chunk, biome, dt);
     }
+    clampCreatureMovement(creature, chunk);
+  }
+}
 
-    const drift = creature.flying || creature.drift ? (biome.gameplayModifiers?.inertia || 0) : 0;
-    creature.x += move.x * speed * dt;
-    creature.y += move.y * speed * dt;
-    if (drift > 0.2) {
-      creature.x += Math.sin(performance.now() / 700 + creature.spawnX) * drift * 14 * dt;
-      creature.y += Math.cos(performance.now() / 900 + creature.spawnY) * drift * 12 * dt;
+function updateCreatureTimers(creature, dt) {
+  creature.hurtTimer = Math.max(0, creature.hurtTimer - dt);
+  creature.slowTimer = Math.max(0, creature.slowTimer - dt);
+  creature.attackTimer = Math.max(0, creature.attackTimer - dt);
+  creature.specialTimer = Math.max(0, creature.specialTimer - dt * 1000);
+  creature.laserTimer = Math.max(0, creature.laserTimer - dt * 1000);
+  creature.sporeTimer = Math.max(0, creature.sporeTimer - dt * 1000);
+  creature.jumpTimer = Math.max(0, creature.jumpTimer - dt * 1000);
+  creature.teleportTimer = Math.max(0, creature.teleportTimer - dt * 1000);
+  creature.hiveAlertTimer = Math.max(0, creature.hiveAlertTimer - dt);
+  creature.burrowTimer = Math.max(0, creature.burrowTimer - dt);
+  creature.tamePulse = Math.max(0, creature.tamePulse - dt);
+}
+
+function updateWildCreature(creature, chunk, biome, dt) {
+  const profile = creature.profile || {};
+  const toPlayer = { x: state.player.x - creature.x, y: state.player.y - creature.y };
+  const playerDist = Math.hypot(toPlayer.x, toPlayer.y);
+  const hostile = isCreatureHostile(creature, playerDist);
+  let move = { x: 0, y: 0 };
+
+  if (profile.behaviorType === "scared" && playerDist < creature.detection) {
+    move = normalize(-toPlayer.x, -toPlayer.y);
+  } else if (hostile && playerDist < creature.chaseRange && state.player.respawnTimer <= 0) {
+    move = normalize(toPlayer.x, toPlayer.y);
+    if (profile.movementStyle === "ambushing" && playerDist > 80 && creature.burrowTimer <= 0) {
+      creature.burrowTimer = 1.2;
     }
-    if (biome.wind?.strength > 0 && !creature.parts.skin) {
-      creature.x += biome.wind.x * biome.wind.strength * 0.18 * dt;
-      creature.y += biome.wind.y * biome.wind.strength * 0.18 * dt;
+  } else if (profile.prefersOriginBiome && !profile.canLeaveOriginBiome && distance(creature, { x: creature.spawnX, y: creature.spawnY }) > 220) {
+    move = normalize(creature.spawnX - creature.x, creature.spawnY - creature.y);
+  } else {
+    move = wanderMove(creature, dt);
+  }
+
+  if (profile.movementStyle === "teleporting" && hostile && playerDist > 130 && playerDist < 360 && creature.teleportTimer <= 0) {
+    creature.teleportTimer = 3200 + Math.random() * 2200;
+    const dir = normalize(toPlayer.x, toPlayer.y);
+    creature.x += dir.x * 92;
+    creature.y += dir.y * 92;
+    addFloatingText("blink", creature.x, creature.y - 26, "#b9f4ff");
+  }
+
+  moveCreature(creature, move, biome, dt);
+  if (hostile) creatureAttackPlayer(creature, biome, playerDist, toPlayer);
+}
+
+function updateTamedCreature(creature, chunk, biome, dt) {
+  const target = findNearestHostileCreature(creature, 260);
+  let move = { x: 0, y: 0 };
+  if (target) {
+    const toTarget = { x: target.x - creature.x, y: target.y - creature.y };
+    const targetDist = Math.hypot(toTarget.x, toTarget.y);
+    move = normalize(toTarget.x, toTarget.y);
+    if (targetDist < Math.max(42, creature.attackRange || 42) && creature.attackTimer <= 0) {
+      creature.attackTimer = Math.max(0.45, (creature.attackCooldown || 1) / Math.max(0.5, creature.aggression));
+      damageCreature(target, creature.damage * 0.75, { id: "ally", knockback: 70 }, normalize(toTarget.x, toTarget.y), "ally");
+      addFloatingText("guard", creature.x, creature.y - 26, "#8ff3ff");
     }
+  } else {
+    const toPlayer = { x: state.player.x - creature.x, y: state.player.y - creature.y };
+    const dist = Math.hypot(toPlayer.x, toPlayer.y);
+    if (dist > 72) move = normalize(toPlayer.x, toPlayer.y);
+    if (dist < 42) move = normalize(-toPlayer.x, -toPlayer.y);
+  }
+  moveCreature(creature, move, biome, dt, 1.12);
+}
+
+function wanderMove(creature, dt) {
+  creature.wanderTimer -= dt;
+  if (creature.wanderTimer <= 0) {
+    creature.wanderTimer = 1 + Math.random() * 2;
+    creature.wanderAngle += -1.2 + Math.random() * 2.4;
+  }
+  return { x: Math.cos(creature.wanderAngle), y: Math.sin(creature.wanderAngle) };
+}
+
+function moveCreature(creature, move, biome, dt, speedBoost = 1) {
+  const profile = creature.profile || {};
+  const currentBiome = state.world.getBiomeAt(creature.x, creature.y);
+  const outsideOrigin = profile.originBiomeId && currentBiome.id !== profile.originBiomeId;
+  let speed = creature.speed * speedBoost * (creature.slowTimer > 0 ? 0.48 : 1);
+  if (outsideOrigin && profile.prefersOriginBiome) speed *= profile.canLeaveOriginBiome ? 0.86 : 0.62;
+  if (profile.movementStyle === "slowStomping") speed *= 0.82;
+  if (profile.movementStyle === "charging" && isCreatureHostile(creature)) speed *= 1.18;
+  if (profile.movementStyle === "jumping" && creature.jumpTimer <= 0) {
+    creature.jumpTimer = 700 + Math.random() * 900;
+    speed *= 2.1;
+  }
+  if (profile.movementStyle === "burrowing" && creature.burrowTimer > 0) speed *= 1.45;
+
+  const drift = creature.flying || creature.drift || profile.movementStyle === "floating" ? (biome.gameplayModifiers?.inertia || 0.3) : 0;
+  creature.x += move.x * speed * dt;
+  creature.y += move.y * speed * dt;
+  if (drift > 0.2) {
+    creature.x += Math.sin(performance.now() / 700 + creature.spawnX) * drift * 14 * dt;
+    creature.y += Math.cos(performance.now() / 900 + creature.spawnY) * drift * 12 * dt;
+  }
+  if (biome.wind?.strength > 0 && !creature.parts.skin && profile.movementStyle !== "slowStomping") {
+    creature.x += biome.wind.x * biome.wind.strength * 0.18 * dt;
+    creature.y += biome.wind.y * biome.wind.strength * 0.18 * dt;
+  }
+}
+
+function clampCreatureMovement(creature, chunk) {
+  const margin = creature.profile?.canLeaveOriginBiome ? CHUNK_SIZE * 1.15 : 28;
+  creature.x = clamp(creature.x, chunk.x - margin, chunk.x + CHUNK_SIZE + margin);
+  creature.y = clamp(creature.y, chunk.y - margin, chunk.y + CHUNK_SIZE + margin);
+  if (!creature.profile?.canLeaveOriginBiome) {
     creature.x = clamp(creature.x, chunk.x + 28, chunk.x + CHUNK_SIZE - 28);
     creature.y = clamp(creature.y, chunk.y + 28, chunk.y + CHUNK_SIZE - 28);
+  }
+}
 
-    creature.attackTimer -= dt;
-    if (playerDist < 38 && creature.attackTimer <= 0) {
-      creature.attackTimer = Math.max(0.45, 1.05 / creature.aggression);
-      hurtPlayer(creature.damage, normalize(toPlayer.x, toPlayer.y));
-    }
+function isCreatureHostile(creature, playerDist = Infinity) {
+  const profile = creature.profile || {};
+  if (profile.isTamed || profile.isFriendly) return false;
+  if (creature.hiveAlertTimer > 0) return true;
+  if (["hostile", "hive", "ambusher"].includes(profile.behaviorType)) return true;
+  if (profile.behaviorType === "territorial" && playerDist < creature.detection * 0.72) return true;
+  return false;
+}
 
-    if (creature.laser) {
-      creature.laserTimer -= dt * 1000;
-      if (playerDist < creature.detection + 80 && creature.laserTimer <= 0) {
-        creature.laserTimer = 1500 + Math.random() * 1400;
-        const dir = normalize(toPlayer.x, toPlayer.y);
-        state.enemyProjectiles.push({
-          x: creature.x,
-          y: creature.y,
-          vx: dir.x * 360 * (biome.gameplayModifiers?.projectileSpeed || 1),
-          vy: dir.y * 360 * (biome.gameplayModifiers?.projectileSpeed || 1),
-          damage: creature.damage + 5,
-          traveled: 0,
-          range: 520 * (biome.gameplayModifiers?.projectileRange || 1),
-          radius: 5,
-          color: "#ff4ca3",
-          effect: "laser"
-        });
-      }
+function findNearestHostileCreature(origin, range) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const creature of nearbyCreatures()) {
+    if (creature === origin || creature.dead || state.deadCreatures.has(creature.id)) continue;
+    if (!isCreatureHostile(creature, distance(origin, creature))) continue;
+    const dist = distance(origin, creature);
+    if (dist < range && dist < bestDist) {
+      best = creature;
+      bestDist = dist;
     }
+  }
+  return best;
+}
 
-    if (creature.spore) {
-      creature.sporeTimer -= dt * 1000;
-      if (playerDist < 90 && creature.sporeTimer <= 0) {
-        creature.sporeTimer = 2600 + Math.random() * 1700;
-        state.effects.push({ type: "spore", x: creature.x, y: creature.y, radius: 76, life: 1.5, maxLife: 1.5 });
-        if (playerDist < 76) hurtPlayer(4, normalize(toPlayer.x, toPlayer.y));
-      }
-    }
+function creatureAttackPlayer(creature, biome, playerDist, toPlayer) {
+  if (creature.attackTimer > 0 || state.player.respawnTimer > 0) return;
+  const profile = creature.profile || {};
+  const attackStyle = profile.attackStyle || "bite";
+  const dir = normalize(toPlayer.x, toPlayer.y);
+  const cooldown = Math.max(0.38, (creature.attackCooldown || 1.05) / Math.max(0.45, creature.aggression));
+
+  if (["bite", "clawSlash", "tailStab", "jumpSlam"].includes(attackStyle) && playerDist < (creature.attackRange || 42)) {
+    creature.attackTimer = cooldown;
+    const extra = attackStyle === "jumpSlam" ? 1.35 : attackStyle === "tailStab" ? 1.12 : 1;
+    hurtPlayer(creature.damage * extra, dir);
+    return;
+  }
+
+  if (attackStyle === "longArmSwipe" && playerDist < 82) {
+    creature.attackTimer = cooldown;
+    hurtPlayer(creature.damage * 0.9, dir);
+    state.effects.push({ type: "swipe", x: creature.x, y: creature.y, aim: dir, radius: 82, color: creature.profile.colorPalette.accent, life: 0.18, maxLife: 0.18 });
+    return;
+  }
+
+  if (attackStyle === "charge" && playerDist < 150) {
+    creature.attackTimer = cooldown * 1.35;
+    creature.x += dir.x * 38;
+    creature.y += dir.y * 38;
+    if (playerDist < 54) hurtPlayer(creature.damage * 1.35, dir);
+    return;
+  }
+
+  if (["rangedProjectile", "laserBeam", "poisonSpit", "fireBreath", "spikeShot"].includes(attackStyle) && playerDist < (creature.attackRange || 320)) {
+    creature.attackTimer = cooldown * (attackStyle === "laserBeam" ? 1.4 : 1);
+    const color = attackStyle === "laserBeam"
+      ? "#ff4ca3"
+      : attackStyle === "poisonSpit"
+        ? "#9ef05c"
+        : attackStyle === "fireBreath"
+          ? "#ff7438"
+          : attackStyle === "spikeShot"
+            ? "#efe1bd"
+            : creature.profile.colorPalette.accent;
+    state.enemyProjectiles.push({
+      x: creature.x,
+      y: creature.y,
+      vx: dir.x * 360 * (biome.gameplayModifiers?.projectileSpeed || 1),
+      vy: dir.y * 360 * (biome.gameplayModifiers?.projectileSpeed || 1),
+      damage: creature.damage + (attackStyle === "laserBeam" ? 5 : 2),
+      traveled: 0,
+      range: (attackStyle === "laserBeam" ? 560 : 420) * (biome.gameplayModifiers?.projectileRange || 1),
+      radius: attackStyle === "fireBreath" ? 8 : 5,
+      color,
+      effect: attackStyle,
+      glow: attackStyle === "laserBeam" ? 1.4 : 1
+    });
+    return;
+  }
+
+  if (["toxicGas", "sporeBurst"].includes(attackStyle) && playerDist < 100) {
+    creature.attackTimer = cooldown * 1.8;
+    const color = attackStyle === "toxicGas" ? "rgba(142, 241, 94, 0.22)" : "rgba(160, 91, 218, 0.22)";
+    state.effects.push({ type: "spore", x: creature.x, y: creature.y, radius: 82, color, life: 1.5, maxLife: 1.5 });
+    if (playerDist < 82) hurtPlayer(creature.damage * 0.55, dir);
+    return;
+  }
+
+  if (["swarmCall", "hiveSignal"].includes(attackStyle) && playerDist < creature.detection + 80) {
+    creature.attackTimer = cooldown * 1.6;
+    alertHive(creature);
+    addFloatingText("signal", creature.x, creature.y - 26, "#ff7b7b");
+  }
+}
+
+function alertHive(source) {
+  const hiveMindId = source.profile?.hiveMindId;
+  if (!hiveMindId) return;
+  for (const creature of nearbyCreatures()) {
+    if (creature.dead || state.deadCreatures.has(creature.id)) continue;
+    if (creature.profile?.hiveMindId !== hiveMindId) continue;
+    if (distance(source, creature) > 560) continue;
+    creature.hiveAlertTimer = Math.max(creature.hiveAlertTimer || 0, 5);
+    creature.profile.isFriendly = false;
+    creature.profile.behaviorType = "hive";
+    creature.profile.temperament = "Hive";
   }
 }
 
@@ -734,6 +926,7 @@ function respawnPlayer() {
 
 function interact() {
   if (pickupNearestDroppedItem()) return;
+  if (tryTameCreature()) return;
   for (const chunk of state.world.nearbyChunks(state.player.x, state.player.y, 1)) {
     for (const resource of chunk.resources) {
       if (resource.collected || distance(resource, state.player) > 44) continue;
@@ -750,6 +943,50 @@ function interact() {
     }
   }
   setStatus("Nothing close enough to interact with.", 1.4);
+}
+
+function tryTameCreature() {
+  let nearest = null;
+  let nearestDistance = Infinity;
+  for (const creature of nearbyCreatures()) {
+    if (creature.dead || state.deadCreatures.has(creature.id)) continue;
+    const dist = distance(creature, state.player);
+    if (dist < nearestDistance && dist < Math.max(64, creature.bodyRadius + 34)) {
+      nearest = creature;
+      nearestDistance = dist;
+    }
+  }
+  if (!nearest) return false;
+  const profile = nearest.profile;
+  if (!profile) return false;
+  if (profile.isTamed) {
+    setStatus(`${profile.name} is already following you.`, 1.5);
+    return true;
+  }
+  if (!profile.isTameable) {
+    if (profile.isFriendly || profile.behaviorType === "neutral") {
+      setStatus(`${profile.name} seems friendly, but not tameable.`, 1.5);
+      return true;
+    }
+    return false;
+  }
+  const tameItem = profile.tameItem;
+  if (!tameItem || (state.player.inventory[tameItem] || 0) <= 0) {
+    setStatus(`${profile.name} wants ${tameItem || "a different offering"}.`, 1.8);
+    return true;
+  }
+  removeResource(tameItem, 1);
+  profile.isTamed = true;
+  profile.isFriendly = true;
+  profile.followsPlayer = true;
+  profile.fightsForPlayer = true;
+  profile.behaviorType = "friendly";
+  profile.temperament = "Tamed";
+  nearest.hiveAlertTimer = 0;
+  nearest.attackTimer = 0;
+  addFloatingText("tamed", nearest.x, nearest.y - nearest.bodyRadius - 18, "#8ff3ff");
+  setStatus(`${profile.name} joined you.`);
+  return true;
 }
 
 function openChest(chest) {
@@ -1276,10 +1513,20 @@ function drawHazard(hazard) {
 
 function drawResource(resource) {
   if (resource.collected) return;
+  const close = distance(resource, state.player) <= 52;
+  ctx.save();
   ctx.fillStyle = RESOURCE_COLORS[resource.type] || "#ffffff";
   circle(resource.x, resource.y, 8);
+  ctx.shadowColor = close ? "rgba(255, 255, 255, 0.75)" : "transparent";
+  ctx.shadowBlur = close ? 13 : 0;
+  ctx.lineWidth = close ? 4 : 3;
+  ctx.strokeStyle = close ? "#ffffff" : "rgba(255, 255, 255, 0.88)";
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.lineWidth = 1.5;
   ctx.strokeStyle = "rgba(0, 0, 0, 0.35)";
   ctx.stroke();
+  ctx.restore();
 }
 
 function drawChest(chest) {
@@ -1319,9 +1566,22 @@ function drawDroppedItems() {
     ctx.beginPath();
     ctx.ellipse(0, 12, item.radius + 5, 5, 0, 0, Math.PI * 2);
     ctx.fill();
+    const close = distance(item, state.player) <= 72;
+    ctx.shadowColor = close ? "rgba(255, 255, 255, 0.78)" : "transparent";
+    ctx.shadowBlur = close ? 15 : 0;
+    ctx.strokeStyle = close ? "#ffffff" : "rgba(255, 255, 255, 0.88)";
+    ctx.lineWidth = close ? 4 : 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, item.radius + 7, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
     ctx.fillStyle = item.color;
     if (item.itemType === "weapon") {
       ctx.rotate(-0.65);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 3;
+      ctx.strokeRect(-3, -16, 6, 28);
+      ctx.strokeRect(-10, -4, 20, 5);
       ctx.fillRect(-3, -16, 6, 28);
       ctx.fillRect(-10, -4, 20, 5);
     } else if (item.itemType === "placeable") {
@@ -1329,11 +1589,18 @@ function drawDroppedItems() {
       ctx.moveTo(0, -15);
       ctx.lineTo(10, 4);
       ctx.lineTo(0, 0);
+      ctx.closePath();
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 3;
+      ctx.stroke();
       ctx.fill();
       ctx.strokeStyle = "#503c1a";
       line(0, -15, 0, 13);
     } else {
       circle(0, 0, item.radius);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
     }
     ctx.fillStyle = "rgba(0, 0, 0, 0.7)";
     ctx.font = "10px sans-serif";
@@ -1404,10 +1671,22 @@ function drawEffects() {
       ctx.restore();
     }
     if (effect.type === "spore") {
-      ctx.fillStyle = `rgba(160, 91, 218, ${0.22 * pct})`;
+      ctx.fillStyle = effect.color || `rgba(160, 91, 218, ${0.22 * pct})`;
       ctx.beginPath();
       ctx.arc(effect.x, effect.y, effect.radius * (1.2 - pct * 0.2), 0, Math.PI * 2);
       ctx.fill();
+    }
+    if (effect.type === "swipe") {
+      ctx.save();
+      ctx.translate(effect.x, effect.y);
+      ctx.rotate(Math.atan2(effect.aim.y, effect.aim.x));
+      ctx.strokeStyle = effect.color || "rgba(255, 255, 255, 0.65)";
+      ctx.globalAlpha = pct;
+      ctx.lineWidth = 7;
+      ctx.beginPath();
+      ctx.arc(0, 0, effect.radius || 82, -0.42, 0.42);
+      ctx.stroke();
+      ctx.restore();
     }
   }
 }
@@ -1646,11 +1925,21 @@ function updateHud() {
   recountResourceInventory();
   healthText.textContent = `Health ${Math.ceil(player.hp)} / ${player.maxHp}`;
   levelText.textContent = `Level ${player.level} | XP ${Math.floor(player.xp)} / ${player.xpNext}`;
-  weaponText.textContent = `Held: ${held?.name || "Empty Hand"} | Biome: ${biome.name}`;
+  weaponText.textContent = `Held: ${held?.name || "Empty Hand"}`;
   resourceText.textContent = RESOURCES.filter((name) => player.inventory[name] > 0)
     .map((name) => `${name}: ${player.inventory[name]}`)
     .join(" | ") || "Resources: none yet";
   const chunk = state.world.chunkCoords(player.x, player.y);
+  const nearestCreature = nearbyCreatures()
+    .filter((creature) => !creature.dead && !state.deadCreatures.has(creature.id))
+    .map((creature) => ({ creature, dist: distance(creature, player) }))
+    .sort((a, b) => a.dist - b.dist)[0]?.creature;
+  const creatureDebug = nearestCreature?.profile ? [
+    `Nearest creature: ${nearestCreature.profile.name}`,
+    `Creature origin: ${nearestCreature.profile.originBiomeName} | can leave: ${nearestCreature.profile.canLeaveOriginBiome}`,
+    `Creature body: ${nearestCreature.profile.bodyType} | move ${nearestCreature.profile.movementStyle} | attack ${nearestCreature.profile.attackStyle}`,
+    `Creature behavior: ${nearestCreature.profile.temperament} | tameable ${nearestCreature.profile.isTameable ? nearestCreature.profile.tameItem : "no"} | hive ${nearestCreature.profile.hiveMindId || "none"}`
+  ] : ["Nearest creature: none"];
   debugOverlay.textContent = [
     `Biome: ${biome.name}`,
     `Parts: ${biome.partLabels.join(" / ")}`,
@@ -1664,6 +1953,7 @@ function updateHud() {
     `Position: ${Math.round(player.x)}, ${Math.round(player.y)}`,
     `Chunk: ${chunk.cx}, ${chunk.cy}`,
     `Held: ${held?.name || "Empty Hand"}`,
+    ...creatureDebug,
     `Multiplayer: ${state.connected ? "connected" : "offline"} ${state.snapshot ? state.snapshot.playerCount + " players" : ""}`,
     `World seed: ${state.worldSeed}`,
     `Opened chests: ${state.openedChests.size}`,

@@ -261,12 +261,6 @@ input {
   font-size: 12px;
 }
 
-#helpPanel {
-  left: 12px;
-  bottom: 12px;
-  width: min(520px, calc(100% - 24px));
-}
-
 #debugOverlay {
   right: 12px;
   bottom: 12px;
@@ -343,7 +337,6 @@ input {
 }
 
 .game-not-started #hud,
-.game-not-started #helpPanel,
 .game-not-started #craftingPanel,
 .game-not-started #inventoryPanel,
 .game-not-started #hotbar,
@@ -378,7 +371,6 @@ input {
   }
 
   #hud,
-  #helpPanel,
   #craftingPanel,
   #inventoryPanel {
     left: 8px;
@@ -394,10 +386,6 @@ input {
     left: 8px;
     right: 8px;
     transform: translateY(-50%);
-  }
-
-  #helpPanel {
-    display: none;
   }
 
   #hotbar {

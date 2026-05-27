@@ -63,13 +63,17 @@ Used/adapted pieces:
 - nostalgic CSS/canvas presentation filter
 - canvas radial-gradient lighting around players, glowing props, projectiles, spores, slime, and fire effects
 - upright prop rendering rules so trees, mushrooms, chests, skulls, bushes, huts, and dead bushes do not rotate sideways
+- cleaner gameplay HUD with biome/controls details kept in the F3 debug overlay
+- white pickup outlines and proximity glow for dropped items, resources, creature drops, and other collectible items
 - top-down movement and mouse aim
 - public/private/code multiplayer lobbies with WebSocket player sync
 - chunked deterministic world generation from a shared seed
 - modular biome profiles built from terrain, climate, gravity, life density, hazard, creature, resource, and lighting parts
 - biome gameplay effects for wind, low/heavy/zero gravity, weather visibility, resource density, hazards, creature density, creature part bias, movement, and projectile range
-- random creatures assembled from 10 mechanical/visual parts, now biased by biome rules
-- melee, ranged, laser, spore, burn, slow, and knockback combat hooks
+- deep creature profiles with origin biome rules, body/head/face details, movement style, attack style, temperament, tameability, hive mind IDs, tiers, invincible variants, and loot tables
+- creature body types including caterpillar, bat, crocodile, slime, spider, worm, bird, frog, skull, plant, crystal, bone beast, floating orb, tiny bug, and giant heavy forms
+- hostile, neutral, friendly, tameable, tamed follower, hive mind, flying, fast, tanky, and rare near-invincible creature foundations
+- melee, ranged, laser, spore, poison, fire, spike, charge, swipe, hive signal, burn, slow, and knockback combat hooks
 - chests with biome-tinted loot and shared opened state
 - five weapons: Stick Sword, Bone Club, Slime Gun, Eye Wand, Fire Tooth
 - Minecraft-style 9-slot hotbar, full inventory panel, stacked resources/consumables, item dropping, dropped item pickup, crafting, XP, level ups, and optional debug overlay
@@ -97,7 +101,7 @@ npm run deploy
 
 ## Current Limitations
 
-- Enemy AI is client-side for the prototype. Creature deaths are synced through the shared room state, but full authoritative enemy simulation is a later step.
+- Enemy AI, taming, hive behavior, and dropped loot are client-side for the prototype. Creature deaths are synced through the shared room state, but full authoritative enemy simulation is a later step.
 - Chest opened state is synced and persisted per room, but loot granting is local to the opener.
 - Dropped items and each player's full inventory are local for this pass; the data shape is ready to sync later.
 - Multiplayer uses template lobbies, not accounts, matchmaking, or persistent profiles.
