@@ -1,6 +1,6 @@
 import { ITEM_DEFS, OCTAGON_RECIPES, RECIPES, RESOURCE_COLORS, RESOURCES, WEAPONS } from "./data.js";
 import { drawCreature } from "./creatures.js";
-import { CHUNK_SIZE, WORLD_CHUNKS_TALL, WORLD_CHUNKS_WIDE, World } from "./world.js";
+import { CHUNK_SIZE, ENEMY_SPAWN_MULTIPLIER, WORLD_CHUNKS_TALL, WORLD_CHUNKS_WIDE, World } from "./world.js";
 import { MultiplayerClient } from "../frontend/multiplayer-client.js";
 import { clamp, distance, normalize, seeded } from "./random.js";
 
@@ -127,6 +127,8 @@ const state = {
     equipment: {},
     buffs: {},
     buffStrengths: {},
+    vehicle: null,
+    insideStructureId: null,
     cooldown: 0,
     hurtTimer: 0,
     respawnTimer: 0
@@ -211,6 +213,8 @@ function prepareNewWorld(seed = state.worldSeed) {
   state.player.hp = state.player.maxHp;
   state.player.buffs = {};
   state.player.buffStrengths = {};
+  state.player.vehicle = null;
+  state.player.insideStructureId = null;
   spawnStructureItems();
   updateCamera(1);
 }
@@ -586,6 +590,8 @@ function movePlayer(dt) {
     player.x += biome.wind.x * windPush * 0.38 * dt;
     player.y += biome.wind.y * windPush * 0.38 * dt;
   }
+  resolvePlayerStructureCollision();
+  updatePlayerInteriorState();
   clampPlayerToWorld();
 }
 
@@ -606,12 +612,27 @@ function updateBuffs(dt) {
     if (next <= 0) delete state.player.buffs[buff];
     else state.player.buffs[buff] = next;
   }
+  if (state.player.vehicle) {
+    state.player.vehicle.time -= dt;
+    if (state.player.vehicle.time <= 0) {
+      setStatus(`${state.player.vehicle.name} ride ended.`, 1.4);
+      state.player.vehicle = null;
+    }
+  }
 }
 
 function playerSpeedMultiplier() {
   let multiplier = 1;
   if (state.player.buffs.speed > 0) multiplier *= state.player.buffStrengths?.speed || 1.35;
   if (state.player.buffs.catForm > 0) multiplier *= 1.35;
+  if (state.player.vehicle) {
+    const vehicle = state.player.vehicle;
+    const biome = currentBiome();
+    multiplier *= vehicle.speed || 1;
+    if (vehicle.terrain?.includes(biome.parts?.terrainBase?.id)) multiplier *= 1.08;
+    if (vehicle.windBonus && (biome.wind?.strength || 0) > 18) multiplier *= 1 + vehicle.windBonus;
+    if (vehicle.windBonus && ["lowGravity", "zeroGravityDrift"].includes(biome.gravity?.id)) multiplier *= 1.12;
+  }
   for (const itemId of Object.values(state.player.equipment || {})) {
     for (const effect of itemDef(itemId).effects || []) {
       if (effect.type === "speedPassive") multiplier *= effect.amount || 1;
@@ -646,7 +667,98 @@ function playerHazardMoveMultiplier() {
       }
     }
   }
+  if (state.player.vehicle?.hazardResist && multiplier < 1) {
+    multiplier = 1 - (1 - multiplier) * state.player.vehicle.hazardResist;
+  }
   return multiplier;
+}
+
+function nearbyStructures(x = state.player.x, y = state.player.y, radius = 2) {
+  return state.world.nearbyChunks(x, y, radius).flatMap((chunk) => chunk.structures || []);
+}
+
+function structureBounds(structure, padding = 0) {
+  const halfW = (structure.width || 84) / 2 + padding;
+  const halfH = (structure.height || 84) / 2 + padding;
+  return {
+    left: structure.x - halfW,
+    right: structure.x + halfW,
+    top: structure.y - halfH,
+    bottom: structure.y + halfH
+  };
+}
+
+function pointInsideStructure(x, y, structure, padding = 0) {
+  const bounds = structureBounds(structure, padding);
+  return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+}
+
+function playerCoverStructure() {
+  if (state.player.insideStructureId) {
+    const inside = nearbyStructures(state.player.x, state.player.y, 2).find((structure) => structure.id === state.player.insideStructureId);
+    if (inside?.blocksLineOfSight) return inside;
+  }
+  return nearbyStructures(state.player.x, state.player.y, 2)
+    .find((structure) => structure.blocksLineOfSight && pointInsideStructure(state.player.x, state.player.y, structure, structure.isEnterable ? -8 : 12));
+}
+
+function updatePlayerInteriorState() {
+  if (state.player.insideStructureId) {
+    const inside = nearbyStructures(state.player.x, state.player.y, 2).find((structure) => structure.id === state.player.insideStructureId);
+    if (!inside || !pointInsideStructure(state.player.x, state.player.y, inside, 4)) state.player.insideStructureId = null;
+    return;
+  }
+  const entered = nearbyStructures(state.player.x, state.player.y, 1)
+    .find((structure) => structure.isEnterable && pointInsideStructure(state.player.x, state.player.y, structure, -10));
+  if (entered) state.player.insideStructureId = entered.id;
+}
+
+function resolvePlayerStructureCollision() {
+  if (state.player.vehicle?.hover || state.player.vehicle?.flight) return;
+  for (const structure of nearbyStructures(state.player.x, state.player.y, 1)) {
+    if (!structure.blocksMovement || structure.isEnterable) continue;
+    pushPointOutsideStructure(state.player, structure, state.player.radius + 4);
+  }
+}
+
+function resolveCreatureStructureCollision(creature) {
+  if (creature.profile?.canFly || creature.flying) return;
+  for (const structure of nearbyStructures(creature.x, creature.y, 1)) {
+    if (!structure.blocksMovement || structure.isEnterable) continue;
+    pushPointOutsideStructure(creature, structure, creature.bodyRadius || 22);
+  }
+}
+
+function pushPointOutsideStructure(point, structure, padding = 0) {
+  if (!pointInsideStructure(point.x, point.y, structure, padding)) return;
+  const bounds = structureBounds(structure, padding);
+  const left = Math.abs(point.x - bounds.left);
+  const right = Math.abs(bounds.right - point.x);
+  const top = Math.abs(point.y - bounds.top);
+  const bottom = Math.abs(bounds.bottom - point.y);
+  const min = Math.min(left, right, top, bottom);
+  if (min === left) point.x = bounds.left;
+  else if (min === right) point.x = bounds.right;
+  else if (min === top) point.y = bounds.top;
+  else point.y = bounds.bottom;
+}
+
+function lineBlockedByStructure(x1, y1, x2, y2, structure) {
+  if (!structure.blocksLineOfSight) return false;
+  const steps = Math.max(6, Math.ceil(Math.hypot(x2 - x1, y2 - y1) / 42));
+  for (let step = 1; step < steps; step += 1) {
+    const t = step / steps;
+    const x = x1 + (x2 - x1) * t;
+    const y = y1 + (y2 - y1) * t;
+    if (pointInsideStructure(x, y, structure, 8)) return true;
+  }
+  return false;
+}
+
+function lineOfSightBlocked(x1, y1, x2, y2) {
+  const midX = (x1 + x2) / 2;
+  const midY = (y1 + y2) / 2;
+  return nearbyStructures(midX, midY, 3).some((structure) => lineBlockedByStructure(x1, y1, x2, y2, structure));
 }
 
 function updateHazardEffects(dt) {
@@ -678,6 +790,7 @@ function useSelectedItem(now) {
   if (item.useType === "equip") return equipItem(item);
   if (item.useType === "place") return placeItem(item);
   if (item.useType === "summon") return useSummonItem(item);
+  if (item.useType === "vehicle") return useVehicleItem(item);
   if (item.useType === "spell" || item.useType === "active") return useActiveItem(item, now);
   if (item.type === "weapon") return attack(now);
   if (input.attackQueued) setStatus(`${item.name} is not directly usable.`, 1);
@@ -723,6 +836,32 @@ function useSummonItem(item) {
   for (let index = 0; index < count; index += 1) summonFollower(followerType, item, damage, shield, index);
   removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
   setStatus(`${item.name} joined your little orbit.`);
+}
+
+function useVehicleItem(item) {
+  let vehicleEffect = null;
+  for (const effect of item.effects || []) {
+    if (effect.type === "vehicle") vehicleEffect = effect;
+  }
+  if (!vehicleEffect) {
+    setStatus(`${item.name} is a vehicle shell for a future pass.`, 1.4);
+    return;
+  }
+  const alreadyRiding = state.player.vehicle?.itemId === item.id;
+  state.player.vehicle = alreadyRiding ? null : {
+    itemId: item.id,
+    name: item.name,
+    speed: vehicleEffect.speed || 1.25,
+    time: vehicleEffect.duration || 24,
+    hover: Boolean(vehicleEffect.hover),
+    flight: Boolean(vehicleEffect.flight),
+    hazardResist: vehicleEffect.hazardResist || 1,
+    windBonus: vehicleEffect.windBonus || 0,
+    terrain: vehicleEffect.terrain || [],
+    controlStyle: vehicleEffect.controlStyle || "ride",
+    color: item.color
+  };
+  setStatus(alreadyRiding ? `Parked ${item.name}.` : `Riding ${item.name}.`);
 }
 
 function useActiveItem(item, now) {
@@ -989,6 +1128,7 @@ function spawnStructureItems() {
   spawnDroppedItem("helmet", 1, 302, 355);
   spawnDroppedItem("fireBook", 1, 275, 320);
   spawnDroppedItem("littleMan", 1, 330, 370);
+  spawnDroppedItem("bicycle", 1, 380, 304);
   for (const chunk of state.world.allChunks()) {
     for (const structure of chunk.structures || []) {
       for (const item of structure.itemSpawns || []) {
@@ -1038,6 +1178,9 @@ function updateCreatureTimers(creature, dt) {
   creature.hiveAlertTimer = Math.max(0, creature.hiveAlertTimer - dt);
   creature.burrowTimer = Math.max(0, creature.burrowTimer - dt);
   creature.tamePulse = Math.max(0, creature.tamePulse - dt);
+  creature.memoryTimer = Math.max(0, (creature.memoryTimer || 0) - dt);
+  creature.searchTimer = Math.max(0, (creature.searchTimer || 0) - dt);
+  creature.lostTimer = Math.max(0, (creature.lostTimer || 0) - dt);
 }
 
 function updateWildCreature(creature, chunk, biome, dt) {
@@ -1045,22 +1188,31 @@ function updateWildCreature(creature, chunk, biome, dt) {
   const toPlayer = { x: state.player.x - creature.x, y: state.player.y - creature.y };
   const playerDist = Math.hypot(toPlayer.x, toPlayer.y);
   const hostile = isCreatureHostile(creature, playerDist);
+  const perception = updateCreaturePerception(creature, playerDist, toPlayer, hostile);
   let move = { x: 0, y: 0 };
 
   if (profile.behaviorType === "scared" && playerDist < creature.detection) {
     move = normalize(-toPlayer.x, -toPlayer.y);
-  } else if (hostile && playerDist < creature.chaseRange && state.player.respawnTimer <= 0) {
-    move = normalize(toPlayer.x, toPlayer.y);
+    creature.aiState = "lost target";
+  } else if (hostile && state.player.respawnTimer <= 0 && creature.aiState === "chasing") {
+    const target = creature.seesPlayer ? state.player : { x: creature.lastSeenX, y: creature.lastSeenY };
+    move = normalize(target.x - creature.x, target.y - creature.y);
     if (profile.movementStyle === "ambushing" && playerDist > 80 && creature.burrowTimer <= 0) {
       creature.burrowTimer = 1.2;
     }
+  } else if (hostile && (creature.aiState === "searching" || creature.aiState === "alert")) {
+    const searchTarget = { x: creature.lastSeenX, y: creature.lastSeenY };
+    if (distance(creature, searchTarget) > 42) move = normalize(searchTarget.x - creature.x, searchTarget.y - creature.y);
+    else move = wanderMove(creature, dt);
   } else if (profile.prefersOriginBiome && !profile.canLeaveOriginBiome && distance(creature, { x: creature.spawnX, y: creature.spawnY }) > 220) {
     move = normalize(creature.spawnX - creature.x, creature.spawnY - creature.y);
+    creature.aiState = "returning";
   } else {
     move = wanderMove(creature, dt);
+    if (!hostile && creature.aiState !== "lost target") creature.aiState = "idle";
   }
 
-  if (profile.movementStyle === "teleporting" && hostile && playerDist > 130 && playerDist < 360 && creature.teleportTimer <= 0) {
+  if (profile.movementStyle === "teleporting" && hostile && creature.aiState === "chasing" && playerDist > 130 && playerDist < 360 && creature.teleportTimer <= 0) {
     creature.teleportTimer = 3200 + Math.random() * 2200;
     const dir = normalize(toPlayer.x, toPlayer.y);
     creature.x += dir.x * 92;
@@ -1069,7 +1221,88 @@ function updateWildCreature(creature, chunk, biome, dt) {
   }
 
   moveCreature(creature, move, biome, dt);
-  if (hostile) creatureAttackPlayer(creature, biome, playerDist, toPlayer);
+  if (hostile && (perception.sees || playerDist < Math.max(46, creature.attackRange || 42))) {
+    creatureAttackPlayer(creature, biome, playerDist, toPlayer);
+  }
+}
+
+function updateCreaturePerception(creature, playerDist, toPlayer, hostile) {
+  const profile = creature.profile || {};
+  const perception = profile.perception || {};
+  const sees = hostile && creatureCanSeePlayer(creature, playerDist, toPlayer);
+  const hears = hostile && creatureCanHearPlayer(creature, playerDist);
+  creature.seesPlayer = sees;
+  creature.hearsPlayer = hears;
+
+  if (!hostile) {
+    if (profile.behaviorType !== "scared") creature.aiState = profile.isFriendly ? "idle" : "wander";
+    return { sees: false, hears: false };
+  }
+
+  if (sees || hears || creature.hiveAlertTimer > 0) {
+    creature.aiState = sees ? "chasing" : "alert";
+    creature.lastSeenX = sees ? state.player.x : creature.lastSeenX || state.player.x;
+    creature.lastSeenY = sees ? state.player.y : creature.lastSeenY || state.player.y;
+    if (hears && !sees) {
+      creature.lastSeenX = state.player.x + (Math.random() - 0.5) * 90;
+      creature.lastSeenY = state.player.y + (Math.random() - 0.5) * 90;
+      creature.aiState = "searching";
+    }
+    creature.memoryTimer = perception.memoryDuration || 2.2;
+    creature.searchTimer = perception.searchDuration || 2.6;
+    return { sees, hears };
+  }
+
+  if ((creature.memoryTimer || 0) > 0) {
+    creature.aiState = "chasing";
+    return { sees: false, hears: false };
+  }
+
+  if ((creature.searchTimer || 0) > 0 && distance(creature, { x: creature.lastSeenX, y: creature.lastSeenY }) < creature.chaseRange) {
+    creature.aiState = "searching";
+    return { sees: false, hears: false };
+  }
+
+  if (creature.aiState === "chasing" || creature.aiState === "searching" || creature.aiState === "alert") {
+    creature.aiState = "lost target";
+    creature.lostTimer = 1.1;
+  } else if ((creature.lostTimer || 0) <= 0) {
+    creature.aiState = profile.prefersOriginBiome && !profile.canLeaveOriginBiome ? "returning" : "idle";
+  }
+  return { sees: false, hears: false };
+}
+
+function creatureCanSeePlayer(creature, playerDist, toPlayer) {
+  const profile = creature.profile || {};
+  const perception = profile.perception || {};
+  if (perception.blind) return false;
+  const biome = state.world.getBiomeAt(creature.x, creature.y);
+  const visibility = perception.seesThroughFog ? 1 : biome.gameplayModifiers?.visibility || 1;
+  const sightRange = Math.min(creature.detection || 220, perception.sightRange || creature.detection || 220) * visibility;
+  if (playerDist > sightRange) return false;
+
+  const cover = playerCoverStructure();
+  if (cover && playerDist > Math.max(42, cover.coverRadius || 44) && !perception.seesThroughFog) return false;
+  if (lineOfSightBlocked(creature.x, creature.y, state.player.x, state.player.y) && playerDist > 58 && !perception.seesThroughFog) return false;
+
+  const facing = creature.facingAngle ?? creature.wanderAngle ?? 0;
+  const targetAngle = Math.atan2(toPlayer.y, toPlayer.x);
+  const diff = Math.abs(angleDelta(facing, targetAngle));
+  return diff <= (perception.sightAngle || Math.PI * 0.65) * 0.5 || playerDist < 72;
+}
+
+function creatureCanHearPlayer(creature, playerDist) {
+  const perception = creature.profile?.perception || {};
+  const hearingRange = perception.hearingRange || 120;
+  if (playerDist > hearingRange) return false;
+  const moving = Math.hypot(state.player.vx || 0, state.player.vy || 0) > 46;
+  const vehicleNoise = state.player.vehicle ? 1.35 : 1;
+  const hidden = Boolean(playerCoverStructure());
+  return (moving || perception.blind || state.player.vehicle) && (!hidden || playerDist < hearingRange * 0.45 * vehicleNoise);
+}
+
+function angleDelta(a, b) {
+  return Math.atan2(Math.sin(b - a), Math.cos(b - a));
 }
 
 function updateTamedCreature(creature, chunk, biome, dt) {
@@ -1115,6 +1348,7 @@ function moveCreature(creature, move, biome, dt, speedBoost = 1) {
     speed *= 2.1;
   }
   if (profile.movementStyle === "burrowing" && creature.burrowTimer > 0) speed *= 1.45;
+  if (Math.hypot(move.x, move.y) > 0.05) creature.facingAngle = Math.atan2(move.y, move.x);
 
   const drift = creature.flying || creature.drift || profile.movementStyle === "floating" ? (biome.gameplayModifiers?.inertia || 0.3) : 0;
   creature.x += move.x * speed * dt;
@@ -1127,6 +1361,7 @@ function moveCreature(creature, move, biome, dt, speedBoost = 1) {
     creature.x += biome.wind.x * biome.wind.strength * 0.18 * dt;
     creature.y += biome.wind.y * biome.wind.strength * 0.18 * dt;
   }
+  resolveCreatureStructureCollision(creature);
 }
 
 function clampCreatureMovement(creature, chunk) {
@@ -1385,6 +1620,15 @@ function handleWorldClick(x, y) {
       openChest(chest);
       return true;
     }
+    for (const structure of chunk.structures || []) {
+      if (!structure.isEnterable || distance(structure, state.player) > Math.max(110, structure.width || 96)) continue;
+      if (!pointInsideStructure(x, y, structure, 12)) continue;
+      state.player.x = structure.x;
+      state.player.y = structure.y + Math.min(18, (structure.height || 90) * 0.12);
+      state.player.insideStructureId = structure.id;
+      setStatus(`Entered ${structure.name}. Enemies lose sight unless they get close.`, 1.8);
+      return true;
+    }
   }
   return false;
 }
@@ -1570,6 +1814,7 @@ function renderItemCodexDetail(itemId) {
   const sources = (item.spawnRules || []).map((rule) => `${rule.source}${rule.condition ? ` (${rule.condition})` : ""}`).join(", ") || "Future-only";
   const tags = (item.craftingTags || []).join(", ") || "none";
   const interactions = (item.interactions || []).join(", ") || "none";
+  const vehicle = (item.effects || []).find((effect) => effect.type === "vehicle");
   creatureCodexDetail.innerHTML = `
     <div class="panel-title">${escapeHtml(item.name)}</div>
     <div class="item-sheet">
@@ -1584,6 +1829,7 @@ function renderItemCodexDetail(itemId) {
         <span class="trait-list"><strong>Description</strong><br>${escapeHtml(item.description || item.codexInfo || "")}</span>
         <span class="trait-list"><strong>Effects</strong><br>${escapeHtml(effects)}</span>
         <span class="trait-list"><strong>Spawn Sources</strong><br>${escapeHtml(sources)}</span>
+        ${vehicle ? `<span class="trait-list"><strong>Vehicle</strong><br>${escapeHtml(vehicleText(vehicle))}</span>` : ""}
         <span class="trait-list"><strong>Crafting Tags</strong><br>${escapeHtml(tags)}</span>
         <span class="trait-list"><strong>Interactions</strong><br>${escapeHtml(interactions)}</span>
       </div>
@@ -1598,7 +1844,21 @@ function effectText(effect) {
   if (effect.type === "follower") return `summon ${effect.count || 1} ${effect.follower}`;
   if (effect.type === "spellProjectile") return `${effect.element} projectile`;
   if (effect.type === "armor") return `${Math.round(effect.amount * 100)}% protection`;
+  if (effect.type === "vehicle") return `ride ${effect.controlStyle || "vehicle"} at ${effect.speed || 1}x speed`;
   return labelize(effect.type);
+}
+
+function vehicleText(effect) {
+  const traits = [
+    `${effect.speed || 1}x speed`,
+    `${effect.duration || 0}s ride`,
+    effect.hover ? "hover" : null,
+    effect.flight ? "short flight" : null,
+    effect.hazardResist ? "reduced hazard slowdown" : null,
+    effect.windBonus ? "wind bonus" : null,
+    effect.terrain?.length ? `strong in ${effect.terrain.join(", ")}` : null
+  ].filter(Boolean);
+  return traits.join(" | ");
 }
 
 function creatureSheetHtml(creature, previewId) {
@@ -1702,11 +1962,12 @@ function rollChestLoot(chest) {
 }
 
 function chestItemPool(biome) {
-  if (biome.parts?.terrainBase?.id === "crystalGround") return ["glowFruit", "lightBook", "gravityMarble", "crystalRifle"];
-  if (biome.parts?.terrainBase?.id === "mushroomSoil" || biome.parts?.terrainBase?.id === "swamp") return ["strangeMushroom", "poisonBook", "tinySlimeBuddy", "toxicSlimeBomb"];
-  if (biome.parts?.terrainBase?.id === "boneField" || biome.parts?.terrainBase?.id === "desert") return ["bonePistol", "shield", "bonePet", "deadCatTail"];
-  if (biome.parts?.terrainBase?.id === "ashland") return ["fireBook", "windJar", "invisibilityBlanket", "Fire Tooth Material"];
-  return ["apple", "orange", "helmet", "littleMan", "swiftBoots"];
+  if (biome.parts?.terrainBase?.id === "crystalGround") return ["glowFruit", "lightBook", "gravityMarble", "crystalRifle", "hoverBoard", "tinyUfo"];
+  if (biome.parts?.terrainBase?.id === "mushroomSoil" || biome.parts?.terrainBase?.id === "swamp") return ["strangeMushroom", "poisonBook", "tinySlimeBuddy", "toxicSlimeBomb", "slimeScooter"];
+  if (biome.parts?.terrainBase?.id === "boneField" || biome.parts?.terrainBase?.id === "desert") return ["bonePistol", "shield", "bonePet", "deadCatTail", "boneBike"];
+  if (biome.parts?.terrainBase?.id === "ashland") return ["fireBook", "windJar", "invisibilityBlanket", "Fire Tooth Material", "boneBike"];
+  if (biome.parts?.terrainBase?.id === "snowfield") return ["iceBook", "windGlider", "hoverBoard", "Ice Shards"];
+  return ["apple", "orange", "helmet", "littleMan", "swiftBoots", "bicycle"];
 }
 
 function addResource(resource, amount) {
@@ -1882,7 +2143,7 @@ function spawnDroppedItem(itemId, quantity, x, y) {
     x,
     y,
     color: def.color,
-    radius: def.type === "weapon" ? 11 : 8
+    radius: def.type === "vehicle" ? 12 : def.type === "weapon" ? 11 : 8
   });
 }
 
@@ -2039,19 +2300,24 @@ function drawWorldBoundary() {
 }
 
 function drawChunkGround(chunk) {
-  const biome = chunk.biomeProfile;
-  ctx.fillStyle = biome.ground;
-  ctx.fillRect(chunk.x, chunk.y, CHUNK_SIZE, CHUNK_SIZE);
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(chunk.x, chunk.y, CHUNK_SIZE, CHUNK_SIZE);
+  const cell = 80;
+  for (let y = 0; y < CHUNK_SIZE; y += cell) {
+    for (let x = 0; x < CHUNK_SIZE; x += cell) {
+      const sampleX = chunk.x + x + cell / 2;
+      const sampleY = chunk.y + y + cell / 2;
+      const organicBiome = state.world.getOrganicBiomeAt(sampleX, sampleY);
+      ctx.fillStyle = organicBiome.ground;
+      ctx.fillRect(chunk.x + x, chunk.y + y, cell + 1, cell + 1);
+    }
+  }
 
   const rng = seeded(`${state.worldSeed}:ground:${chunk.cx}:${chunk.cy}`);
   for (let index = 0; index < 18; index += 1) {
-    ctx.fillStyle = index % 2 ? biome.groundAlt : "rgba(255, 255, 255, 0.08)";
-    ctx.globalAlpha = 0.18 + rng() * 0.12;
     const x = chunk.x + rng() * CHUNK_SIZE;
     const y = chunk.y + rng() * CHUNK_SIZE;
+    const biome = state.world.getOrganicBiomeAt(x, y);
+    ctx.fillStyle = index % 2 ? biome.groundAlt : "rgba(255, 255, 255, 0.08)";
+    ctx.globalAlpha = 0.18 + rng() * 0.12;
     ctx.beginPath();
     ctx.ellipse(x, y, 24 + rng() * 70, 10 + rng() * 30, rng() * Math.PI, 0, Math.PI * 2);
     ctx.fill();
@@ -2270,49 +2536,146 @@ function drawChest(chest) {
 function drawStructure(structure) {
   ctx.save();
   ctx.translate(structure.x, structure.y);
+  const w = structure.width || 96;
+  const h = structure.height || 88;
+  const inside = state.player.insideStructureId === structure.id;
   ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
   ctx.beginPath();
-  ctx.ellipse(0, 28, 46, 13, 0, 0, Math.PI * 2);
+  ctx.ellipse(0, h * 0.34, w * 0.46, 14, 0, 0, Math.PI * 2);
   ctx.fill();
+  if (structure.blocksLineOfSight) {
+    ctx.strokeStyle = inside ? "rgba(136, 238, 255, 0.7)" : "rgba(255, 255, 255, 0.18)";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 6]);
+    ctx.strokeRect(-w / 2, -h / 2, w, h);
+    ctx.setLineDash([]);
+  }
   ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
   ctx.lineWidth = 3;
   ctx.fillStyle = structure.color || "#d7a34f";
-  if (structure.type === "smallHut") {
-    ctx.fillRect(-30, -8, 60, 42);
+  ctx.globalAlpha = inside && structure.isEnterable ? 0.48 : 1;
+
+  if (structure.structureType === "camp") {
+    ctx.fillStyle = "#8b5d38";
+    ctx.fillRect(-w * 0.35, -8, w * 0.32, 26);
+    ctx.fillStyle = structure.color;
+    ctx.fillRect(w * 0.04, -4, w * 0.36, 20);
+    ctx.fillStyle = "#ff9a3d";
+    circle(0, 18, 10);
+    ctx.strokeStyle = "#5c3a27";
+    line(-26, 24, 26, 10);
+  } else if (structure.structureType === "hut" || structure.type === "smallHut" || structure.structureType === "house") {
+    ctx.fillRect(-w * 0.38, -h * 0.18, w * 0.76, h * 0.48);
     ctx.beginPath();
-    ctx.moveTo(-38, -8);
-    ctx.lineTo(0, -46);
-    ctx.lineTo(38, -8);
+    ctx.moveTo(-w * 0.46, -h * 0.18);
+    ctx.lineTo(0, -h * 0.55);
+    ctx.lineTo(w * 0.46, -h * 0.18);
     ctx.closePath();
     ctx.fill();
-  } else if (structure.type === "crystalShrine") {
+    ctx.fillStyle = "#30221c";
+    ctx.fillRect(-7, h * 0.06, 14, h * 0.24);
+    if (structure.structureType === "house") {
+      ctx.fillStyle = "#ffe4a3";
+      ctx.fillRect(-w * 0.24, -h * 0.02, 16, 13);
+      ctx.fillRect(w * 0.16, -h * 0.02, 16, 13);
+    }
+  } else if (structure.structureType === "well") {
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w * 0.33, h * 0.25, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = structure.type === "poisonWell" ? "rgba(142, 241, 94, 0.5)" : "rgba(60, 80, 96, 0.45)";
+    ctx.beginPath();
+    ctx.ellipse(0, -4, w * 0.22, h * 0.12, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (structure.structureType === "wreck") {
+    ctx.save();
+    ctx.rotate(-0.16);
+    ctx.fillRect(-w * 0.44, -h * 0.16, w * 0.72, h * 0.34);
+    ctx.strokeStyle = "#3e2c24";
+    ctx.lineWidth = 5;
+    circle(-w * 0.28, h * 0.19, 12);
+    circle(w * 0.3, h * 0.19, 12);
+    ctx.restore();
+  } else if (structure.structureType === "shrine" && structure.visualParts?.includes("crystals")) {
     for (let i = -2; i <= 2; i += 1) {
       ctx.beginPath();
-      ctx.moveTo(i * 14, -48 + Math.abs(i) * 8);
-      ctx.lineTo(i * 14 - 10, 30);
-      ctx.lineTo(i * 14 + 11, 30);
+      ctx.moveTo(i * 15, -h * 0.48 + Math.abs(i) * 8);
+      ctx.lineTo(i * 15 - 10, h * 0.28);
+      ctx.lineTo(i * 15 + 11, h * 0.28);
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
     }
-  } else if (structure.type === "boneGate") {
-    ctx.fillRect(-38, -42, 12, 76);
-    ctx.fillRect(26, -42, 12, 76);
-    ctx.fillRect(-38, -42, 76, 12);
-  } else if (structure.type === "poisonWell") {
-    ctx.beginPath();
-    ctx.ellipse(0, 0, 34, 26, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "rgba(142, 241, 94, 0.45)";
-    ctx.beginPath();
-    ctx.ellipse(0, -3, 24, 13, 0, 0, Math.PI * 2);
-    ctx.fill();
-  } else if (structure.type === "spellTower") {
-    ctx.fillRect(-24, -54, 48, 88);
+  } else if (structure.structureType === "ring") {
+    for (let i = 0; i < 10; i += 1) {
+      const angle = (i / 10) * Math.PI * 2;
+      ctx.fillStyle = i % 2 ? "#ff72d2" : "#d7e9ff";
+      ctx.beginPath();
+      ctx.ellipse(Math.cos(angle) * w * 0.38, Math.sin(angle) * h * 0.3, 14, 9, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  } else if (structure.structureType === "gate") {
+    ctx.fillRect(-w * 0.38, -h * 0.42, 14, h * 0.74);
+    ctx.fillRect(w * 0.28, -h * 0.42, 14, h * 0.74);
+    ctx.fillRect(-w * 0.38, -h * 0.42, w * 0.76, 14);
+    ctx.fillStyle = "#2d2731";
+    circle(-w * 0.31, -h * 0.47, 8);
+    circle(w * 0.35, -h * 0.47, 8);
+  } else if (structure.structureType === "tower") {
+    ctx.fillRect(-w * 0.24, -h * 0.36, w * 0.48, h * 0.72);
     ctx.fillStyle = "#2d2437";
-    ctx.fillRect(-10, -36, 20, 18);
+    ctx.fillRect(-w * 0.1, -h * 0.22, w * 0.2, h * 0.12);
     ctx.fillStyle = structure.color;
-    circle(0, -62, 13);
+    circle(0, -h * 0.47, 13);
+  } else if (structure.structureType === "statue" || structure.structureType === "monument") {
+    ctx.beginPath();
+    ctx.moveTo(0, -h * 0.46);
+    ctx.lineTo(w * 0.26, h * 0.28);
+    ctx.lineTo(-w * 0.26, h * 0.28);
+    ctx.closePath();
+    ctx.fill();
+    if (structure.visualParts?.includes("wings")) {
+      ctx.globalAlpha *= 0.7;
+      ctx.beginPath();
+      ctx.ellipse(-w * 0.26, -h * 0.18, w * 0.2, h * 0.12, -0.5, 0, Math.PI * 2);
+      ctx.ellipse(w * 0.26, -h * 0.18, w * 0.2, h * 0.12, 0.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = inside && structure.isEnterable ? 0.48 : 1;
+    }
+    ctx.fillStyle = "#2a2330";
+    circle(-7, -h * 0.1, 5);
+    circle(7, -h * 0.1, 5);
+  } else if (structure.structureType === "cave") {
+    ctx.fillStyle = "#4c4858";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w * 0.42, h * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#181722";
+    ctx.beginPath();
+    ctx.ellipse(0, 8, w * 0.28, h * 0.2, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (structure.structureType === "pond") {
+    ctx.fillStyle = "rgba(98, 224, 139, 0.42)";
+    ctx.beginPath();
+    ctx.ellipse(0, 5, w * 0.42, h * 0.26, -0.08, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  } else if (structure.structureType === "temple") {
+    ctx.fillRect(-w * 0.42, -h * 0.18, w * 0.84, h * 0.48);
+    for (let i = -2; i <= 2; i += 1) {
+      ctx.beginPath();
+      ctx.moveTo(i * 22, -h * 0.5 + Math.abs(i) * 4);
+      ctx.lineTo(i * 22 - 11, -h * 0.14);
+      ctx.lineTo(i * 22 + 11, -h * 0.14);
+      ctx.fill();
+    }
+  } else if (structure.structureType === "nest") {
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w * 0.38, h * 0.28, 0.12, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#2d2731";
+    for (let i = -2; i <= 2; i += 1) circle(i * 16, Math.sin(i) * 10, 7);
   } else {
     ctx.beginPath();
     ctx.moveTo(0, -50);
@@ -2325,11 +2688,21 @@ function drawStructure(structure) {
     circle(-9, -10, 5);
     circle(9, -10, 5);
   }
-  ctx.strokeRect(-42, -54, 84, 88);
+  ctx.globalAlpha = 1;
+  if (structure.isEnterable) {
+    ctx.fillStyle = inside ? "rgba(128, 240, 255, 0.32)" : "rgba(0, 0, 0, 0.38)";
+    ctx.fillRect(-10, h * 0.18, 20, 18);
+  }
+  if (inside) {
+    ctx.fillStyle = "rgba(128, 240, 255, 0.18)";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w * 0.5, h * 0.4, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
   ctx.fillStyle = "rgba(0, 0, 0, 0.72)";
   ctx.font = "11px sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText(structure.name, 0, -60);
+  ctx.fillText(structure.name, 0, -h * 0.5 - 8);
   ctx.restore();
 }
 
@@ -2374,6 +2747,16 @@ function drawDroppedItems() {
       ctx.strokeRect(-10, -4, 20, 5);
       ctx.fillRect(-3, -16, 6, 28);
       ctx.fillRect(-10, -4, 20, 5);
+    } else if (item.itemType === "vehicle") {
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 17, 9, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fill();
+      ctx.fillStyle = "#171820";
+      circle(-9, 8, 4);
+      circle(9, 8, 4);
     } else if (item.itemType === "placeable") {
       ctx.beginPath();
       ctx.moveTo(0, -15);
@@ -2463,6 +2846,29 @@ function drawPlayer() {
   ctx.save();
   ctx.translate(player.x, player.y);
   ctx.globalAlpha = player.respawnTimer > 0 ? 0.45 : player.buffs.invisible > 0 ? 0.38 : 1;
+  if (player.vehicle) {
+    ctx.save();
+    ctx.rotate(Math.atan2(aim.y, aim.x));
+    ctx.fillStyle = player.vehicle.color || "#f2d36b";
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.78)";
+    ctx.lineWidth = 3;
+    if (player.vehicle.flight || player.vehicle.hover) {
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 31, 15, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "rgba(125, 241, 255, 0.28)";
+      circle(-12, 13, 7);
+      circle(12, 13, 7);
+    } else {
+      ctx.fillRect(-28, -6, 56, 12);
+      ctx.strokeRect(-28, -6, 56, 12);
+      ctx.fillStyle = "#1c1b20";
+      circle(-21, 10, 7);
+      circle(21, 10, 7);
+    }
+    ctx.restore();
+  }
   ctx.fillStyle = player.hurtTimer > 0 ? "#ffaaa3" : "#69d2ff";
   circle(0, 0, player.radius);
   ctx.fillStyle = "#ffdf6e";
@@ -2906,7 +3312,9 @@ function updateHud() {
     `Nearest creature: ${nearestCreature.profile.name}`,
     `Creature origin: ${nearestCreature.profile.originBiomeName} | can leave: ${nearestCreature.profile.canLeaveOriginBiome}`,
     `Creature body: ${nearestCreature.profile.bodyType} | move ${nearestCreature.profile.movementStyle} | attack ${nearestCreature.profile.attackStyle}`,
-    `Creature behavior: ${nearestCreature.profile.temperament} | tameable ${nearestCreature.profile.isTameable ? nearestCreature.profile.tameItem : "no"} | hive ${nearestCreature.profile.hiveMindId || "none"}`
+    `Creature behavior: ${nearestCreature.profile.temperament} | tameable ${nearestCreature.profile.isTameable ? nearestCreature.profile.tameItem : "no"} | hive ${nearestCreature.profile.hiveMindId || "none"}`,
+    `Creature AI: ${nearestCreature.aiState || "idle"} | sees player ${nearestCreature.seesPlayer ? "yes" : "no"} | hears ${nearestCreature.hearsPlayer ? "yes" : "no"}`,
+    `Creature sight: ${nearestCreature.profile.perception?.sightRange || nearestCreature.detection} range | ${nearestCreature.profile.perception?.visionQuality || "normal"} vision | memory ${(nearestCreature.memoryTimer || 0).toFixed(1)}s`
   ] : ["Nearest creature: none"];
   debugOverlay.textContent = [
     `Biome: ${biome.name}`,
@@ -2927,7 +3335,9 @@ function updateHud() {
     `Opened chests: ${state.openedChests.size}`,
     `Defeated creatures: ${state.deadCreatures.size}`,
     `Dropped items: ${state.droppedItems.length}`,
-    `World: ${WORLD_CHUNKS_WIDE}x${WORLD_CHUNKS_TALL} finite chunks`
+    `World: ${WORLD_CHUNKS_WIDE}x${WORLD_CHUNKS_TALL} finite chunks`,
+    `Enemy spawn multiplier: ${ENEMY_SPAWN_MULTIPLIER}`,
+    `Biome region: ${biome.regionName || biome.regionId} @ ${biome.regionCenter?.x || 0}, ${biome.regionCenter?.y || 0}`
   ].join("\n");
   renderHotbar();
   if (state.inventoryOpen) renderInventoryPanel();

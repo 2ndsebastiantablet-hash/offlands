@@ -32,6 +32,7 @@ Controls:
 - Click a nearby dropped item/resource: pick it up
 - Click a nearby chest: open it
 - Click a nearby creature: identify it and add it to the Creature Codex
+- Click an enterable structure: step inside and hide from most enemy sight
 - `1`-`9`: select hotbar slot
 - `Shift` + number: drop from that hotbar slot
 - `E`: toggle full inventory
@@ -69,23 +70,29 @@ Used/adapted pieces:
 - white pickup outlines and proximity glow for dropped items, resources, creature drops, and other collectible items
 - finite 12x12 chunk worlds pregenerated from the world seed before play, with visible world borders
 - reduced enemy density with safer starting chunks, sparse/empty low-spawn biomes, and capped dangerous chunks
+- global enemy spawn tuning via `ENEMY_SPAWN_MULTIPLIER`
 - ten-heart health UI with compact level/XP and held item readouts
 - top-down movement and mouse aim
 - public/private/code multiplayer lobbies with WebSocket player sync
 - chunked deterministic finite world generation from a shared seed
+- organic biome region blobs with irregular shapes/sizes layered over the finite chunk grid
 - modular biome profiles built from terrain, climate, gravity, life density, hazard, creature, resource, and lighting parts
 - biome gameplay effects for wind, low/heavy/zero gravity, weather visibility, resource density, hazards, creature density, creature part bias, movement, and projectile range
 - deep creature profiles with origin biome rules, body/head/face details, movement style, attack style, temperament, tameability, hive mind IDs, tiers, invincible variants, and loot tables
 - creature body types including caterpillar, bat, crocodile, slime, spider, worm, bird, frog, skull, plant, crystal, bone beast, floating orb, tiny bug, and giant heavy forms
 - hostile, neutral, friendly, tameable, tamed follower, hive mind, flying, fast, tanky, and rare near-invincible creature foundations
+- enemy perception AI with sight ranges, sight cones, hearing, memory, searching, last-seen positions, and lost-target states
+- structure cover and enterable interiors that can block line of sight so players can break chases
 - melee, ranged, laser, spore, poison, fire, spike, charge, swipe, hive signal, burn, slow, and knockback combat hooks
 - Creature Codex with clickable creature inspection, preview images, origin biome data, behavior traits, tameability, and known drops
 - Item Codex with discovered item categories, rarity, effects, stack sizes, spawn sources, crafting tags, and interactions
 - deep item registry with food, weapons, guns, spell books, armor/equipment, followers/summons, creature materials, transformation pieces, and weird utility items
 - temporary buffs, passive equipment, active items, spell effects, follower summons, armor protection, and teleport/push/pull/cloud hooks
 - Crafting Octagon with eight input points, data-driven combinations, non-consumed preview ingredients, and center-result crafting
-- structure foundation with huts, crystal shrines, bone gates, poison wells, spell towers, and broken cat statues that spawn rare items
+- premade structure system with camps, huts, wells, carts, statues, mushroom rings, shrines, houses, towers, caves, temples, nests, gates, and monuments
+- structure placement rules for biome conditions, rarity, non-overlap, spawn safety, loot spawns, line-of-sight blocking, and enterable cover
 - placeholder boss foundation with a rare structure boss, special profile data, larger stats, and special drops
+- vehicle item category with Bicycle, Hover Board, Slime Scooter, Wind Glider, Tiny UFO, and Bone Bike ride effects
 - flexible creature loot tables with physical drops such as Wing Scraps, Silk, Poison Sac, Scales, Teeth, Meat, Crystals, Ash, and Glow Spores
 - chests with biome-tinted loot and shared opened state
 - expanded weapons including Stick Sword, Bone Club, Slime Gun, Eye Wand, Fire Tooth, Bone Sword, Pineapple Gun, Teleport Gun, Bone Pistol, Crystal Rifle, Orange Launcher, Crystal Light Wand, and Ultra Wand

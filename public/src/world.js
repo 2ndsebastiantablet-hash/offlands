@@ -6,6 +6,7 @@ export const CHUNK_SIZE = 640;
 export const VIEW_RADIUS = 2;
 export const WORLD_CHUNKS_WIDE = 12;
 export const WORLD_CHUNKS_TALL = 12;
+export const ENEMY_SPAWN_MULTIPLIER = 0.42;
 
 const CATEGORY_ORDER = [
   "terrainBase",
@@ -39,6 +40,9 @@ export class World {
     };
     this.chunks = new Map();
     this.biomeProfiles = new Map();
+    this.regionProfiles = new Map();
+    this.biomeRegions = this.generateBiomeRegions();
+    this.structureFootprints = [];
     this.generateWorld();
   }
 
@@ -72,6 +76,7 @@ export class World {
   }
 
   generateWorld() {
+    this.structureFootprints = [];
     for (let cy = this.minChunkY; cy <= this.maxChunkY; cy += 1) {
       for (let cx = this.minChunkX; cx <= this.maxChunkX; cx += 1) {
         const key = this.key(cx, cy);
@@ -94,6 +99,12 @@ export class World {
     const pos = this.clampPosition(x, y, 1);
     const { cx, cy } = this.chunkCoords(pos.x, pos.y);
     return this.getChunk(cx, cy).biomeProfile;
+  }
+
+  getOrganicBiomeAt(x, y) {
+    const pos = this.clampPosition(x, y, 1);
+    const region = this.chooseBiomeRegionAtPoint(pos.x, pos.y);
+    return this.regionProfiles.get(region?.id) || this.getBiomeAt(pos.x, pos.y);
   }
 
   nearbyChunks(x, y, radius = VIEW_RADIUS) {
@@ -133,15 +144,25 @@ export class World {
     const hazards = [];
     const structures = [];
 
+    const forcedCatStatue = cx === this.maxChunkX - 2 && cy === this.maxChunkY - 2;
+    if (forcedCatStatue || shouldGenerateStructure(cx, cy, biomeProfile, rng)) {
+      const structure = createStructure(this.seed, cx, cy, biomeProfile, rng, forcedCatStatue ? "brokenCatStatue" : null);
+      if (structure && this.canPlaceStructure(structure, forcedCatStatue)) {
+        structures.push(structure);
+        this.structureFootprints.push(structure);
+      }
+    }
+
     const propCount = Math.max(1, Math.round((12 + rng() * 18) * biomeProfile.plantDensity));
     for (let index = 0; index < propCount; index += 1) {
       const type = choose(rng, biomeProfile.props);
       const allowRotation = allowsPropRotation(type);
+      const point = randomOpenPoint(originX, originY, 34, structures, rng);
       props.push({
         id: `${cx}:${cy}:prop:${index}`,
         type,
-        x: originX + randRange(rng, 34, CHUNK_SIZE - 34),
-        y: originY + randRange(rng, 34, CHUNK_SIZE - 34),
+        x: point.x,
+        y: point.y,
         size: randRange(rng, 0.7, 1.35),
         allowRotation,
         spin: allowRotation ? randRange(rng, -0.22, 0.22) : 0,
@@ -151,11 +172,12 @@ export class World {
 
     const resourceCount = Math.max(1, Math.round((6 + rng() * 10) * biomeProfile.resourceDensity));
     for (let index = 0; index < resourceCount; index += 1) {
+      const point = randomOpenPoint(originX, originY, 42, structures, rng);
       resources.push({
         id: `${cx}:${cy}:res:${index}`,
         type: choose(rng, biomeProfile.resources),
-        x: originX + randRange(rng, 42, CHUNK_SIZE - 42),
-        y: originY + randRange(rng, 42, CHUNK_SIZE - 42),
+        x: point.x,
+        y: point.y,
         amount: 1 + Math.floor(rng() * 3),
         collected: false
       });
@@ -163,26 +185,23 @@ export class World {
 
     if (maybe(rng, biomeProfile.chestChance)) {
       const chestId = `${cx}:${cy}:chest:0`;
+      const point = randomOpenPoint(originX, originY, 82, structures, rng);
       chests.push({
         id: chestId,
         biomeId,
         biomeName: biomeProfile.name,
-        x: originX + randRange(rng, 82, CHUNK_SIZE - 82),
-        y: originY + randRange(rng, 82, CHUNK_SIZE - 82),
+        x: point.x,
+        y: point.y,
         opened: false,
         loot: createChestLoot(this.seed, chestId, biomeProfile)
       });
     }
 
-    const forcedCatStatue = cx === this.maxChunkX - 2 && cy === this.maxChunkY - 2;
-    if (forcedCatStatue || shouldGenerateStructure(cx, cy, biomeProfile, rng)) {
-      structures.push(createStructure(this.seed, cx, cy, biomeProfile, rng, forcedCatStatue ? "brokenCatStatue" : null));
-    }
-
     const creatureCount = creatureCountForChunk(cx, cy, biomeProfile, rng);
     for (let index = 0; index < creatureCount; index += 1) {
-      let creatureX = originX + randRange(rng, 70, CHUNK_SIZE - 70);
-      let creatureY = originY + randRange(rng, 70, CHUNK_SIZE - 70);
+      const point = randomOpenPoint(originX, originY, 70, structures, rng);
+      let creatureX = point.x;
+      let creatureY = point.y;
       const isFirstDiscoveryCreature = cx === 0 && cy === 0 && index === 0;
       if (isFirstDiscoveryCreature) {
         creatureX = originX + 430;
@@ -245,6 +264,7 @@ export class World {
 
   generateBiomeProfile(cx, cy) {
     const parts = {};
+    const region = this.chooseBiomeRegion(cx, cy);
 
     if (cx === 0 && cy === 0) {
       parts.terrainBase = findPart("terrainBase", "grassland");
@@ -255,10 +275,12 @@ export class World {
       parts.creatureBias = findPart("creatureBias", "peacefulSparse");
       parts.resourceBias = findPart("resourceBias", "woodLeaves");
       parts.lightingMood = findPart("lightingMood", "bright");
-    } else {
+    } else if (region?.parts) {
       for (const category of CATEGORY_ORDER) {
-        parts[category] = chooseRegionalPart(this.seed, category, cx, cy);
+        parts[category] = region.parts[category] || chooseRegionalPart(this.seed, category, cx, cy);
       }
+    } else {
+      for (const category of CATEGORY_ORDER) parts[category] = chooseRegionalPart(this.seed, category, cx, cy);
     }
 
     const terrain = parts.terrainBase;
@@ -270,6 +292,10 @@ export class World {
     const profile = {
       id: CATEGORY_ORDER.map((category) => parts[category].id).join("-"),
       name: nameBiome(parts),
+      regionId: region?.id || "spawn-safe-region",
+      regionName: region?.name || "Spawn Green",
+      regionCenter: region ? { x: Math.round(region.x), y: Math.round(region.y) } : { x: 320, y: 320 },
+      regionRadius: region ? Math.round((region.radiusX + region.radiusY) / 2) : CHUNK_SIZE * 1.4,
       legacyId: terrain.legacyId || "wildlands",
       parts,
       partLabels: CATEGORY_ORDER.map((category) => parts[category].label),
@@ -378,7 +404,89 @@ export class World {
     if (profile.hazards.includes("windStream")) profile.hazardDensity += 0.35;
     if (profile.hazards.includes("lavaCrack")) profile.hazardDensity += 0.2;
 
+    if (region?.id && !this.regionProfiles.has(region.id)) this.regionProfiles.set(region.id, profile);
+
     return profile;
+  }
+
+  generateBiomeRegions() {
+    const rng = seeded(`${this.seed}:organic-biome-regions`);
+    const regions = [
+      {
+        id: "spawn-green",
+        x: 320,
+        y: 320,
+        radiusX: CHUNK_SIZE * 1.9,
+        radiusY: CHUNK_SIZE * 1.55,
+        irregularity: 0.18,
+        priority: 1.25,
+        parts: safeSpawnParts(),
+        name: "Spawn Green"
+      }
+    ];
+    const regionCount = 17;
+    for (let index = 0; index < regionCount; index += 1) {
+      const terrain = choose(rng, BIOME_PARTS.terrainBase);
+      const parts = { terrainBase: terrain };
+      for (const category of CATEGORY_ORDER) {
+        if (category === "terrainBase") continue;
+        parts[category] = choose(rng, BIOME_PARTS[category]);
+      }
+      const wide = rng() < 0.32;
+      const radiusX = randRange(rng, wide ? 960 : 560, wide ? 2100 : 1350);
+      const radiusY = randRange(rng, wide ? 360 : 520, wide ? 1020 : 1620);
+      regions.push({
+        id: `region-${index}-${terrain.id}`,
+        x: randRange(rng, this.bounds.minX + 260, this.bounds.maxX - 260),
+        y: randRange(rng, this.bounds.minY + 260, this.bounds.maxY - 260),
+        radiusX,
+        radiusY,
+        angle: randRange(rng, -Math.PI, Math.PI),
+        irregularity: randRange(rng, 0.18, 0.42),
+        priority: randRange(rng, 0.88, 1.18),
+        parts,
+        name: `${terrain.label} Region`
+      });
+    }
+    return regions;
+  }
+
+  chooseBiomeRegion(cx, cy) {
+    if (cx === 0 && cy === 0) return this.biomeRegions[0];
+    const x = cx * CHUNK_SIZE + CHUNK_SIZE / 2;
+    const y = cy * CHUNK_SIZE + CHUNK_SIZE / 2;
+    return this.chooseBiomeRegionAtPoint(x, y);
+  }
+
+  chooseBiomeRegionAtPoint(x, y) {
+    if (Math.hypot(x - 320, y - 320) < CHUNK_SIZE * 0.9) return this.biomeRegions[0];
+    let best = this.biomeRegions[0];
+    let bestScore = -Infinity;
+    for (const region of this.biomeRegions) {
+      const angle = region.angle || 0;
+      const dx = x - region.x;
+      const dy = y - region.y;
+      const rx = Math.cos(angle) * dx + Math.sin(angle) * dy;
+      const ry = -Math.sin(angle) * dx + Math.cos(angle) * dy;
+      const dist = Math.hypot(rx / region.radiusX, ry / region.radiusY);
+      const edgeNoise = (valueNoise(`${this.seed}:${region.id}:edge`, x / 580, y / 580) - 0.5) * region.irregularity;
+      const detailNoise = (valueNoise(`${this.seed}:${region.id}:detail`, x / 185, y / 185) - 0.5) * 0.08;
+      const score = (1.12 - dist + edgeNoise + detailNoise) * (region.priority || 1);
+      if (score > bestScore) {
+        best = region;
+        bestScore = score;
+      }
+    }
+    return best;
+  }
+
+  canPlaceStructure(structure, forced = false) {
+    if (!structure) return false;
+    const bounds = structureBounds(structure, forced ? 10 : 34);
+    if (bounds.left < this.bounds.minX + 36 || bounds.right > this.bounds.maxX - 36) return false;
+    if (bounds.top < this.bounds.minY + 36 || bounds.bottom > this.bounds.maxY - 36) return false;
+    if (!forced && Math.hypot(structure.x - 320, structure.y - 320) < CHUNK_SIZE * 1.35) return false;
+    return this.structureFootprints.every((other) => !rectsOverlap(bounds, structureBounds(other, 58)));
   }
 }
 
@@ -392,6 +500,19 @@ function chooseRegionalPart(seed, category, cx, cy) {
 
 function findPart(category, id) {
   return BIOME_PARTS[category].find((part) => part.id === id) || BIOME_PARTS[category][0];
+}
+
+function safeSpawnParts() {
+  return {
+    terrainBase: findPart("terrainBase", "grassland"),
+    climate: findPart("climate", "calm"),
+    gravity: findPart("gravity", "normalGravity"),
+    lifeDensity: findPart("lifeDensity", "sparse"),
+    hazardStyle: findPart("hazardStyle", "none"),
+    creatureBias: findPart("creatureBias", "peacefulSparse"),
+    resourceBias: findPart("resourceBias", "woodLeaves"),
+    lightingMood: findPart("lightingMood", "bright")
+  };
 }
 
 function nameBiome(parts) {
@@ -437,12 +558,15 @@ function allowsPropRotation(type) {
 }
 
 function creatureCountForChunk(cx, cy, biome, rng) {
-  if (cx === 0 && cy === 0) return 1;
+  if (Math.abs(cx) <= 1 && Math.abs(cy) <= 1) {
+    if (cx === 0 && cy === 0) return 1;
+    return 0;
+  }
   const lifeId = biome.parts?.lifeDensity?.id || "normal";
   const density = biome.creatureDensity || 1;
   const dangerous = lifeId === "infested" || biome.parts?.creatureBias?.id === "aggressiveCreatures" || biome.hazards.length > 1;
   let min = 1;
-  let max = 3;
+  let max = 2;
 
   if (lifeId === "empty" || density < 0.36) {
     min = 0;
@@ -451,57 +575,125 @@ function creatureCountForChunk(cx, cy, biome, rng) {
     min = 0;
     max = 1;
   } else if (dangerous || density > 1.35) {
-    min = 2;
-    max = 5;
+    min = lifeId === "infested" ? 2 : 1;
+    max = lifeId === "infested" ? 5 : 4;
   }
 
   if (biome.weather === "snowstorm" || biome.weather === "dust storm" || biome.temperature === "freezing") {
     max = Math.max(min, max - 1);
   }
 
-  if (min === 0 && rng() > Math.min(0.76, density * 0.9)) return 0;
+  const tunedDensity = density * ENEMY_SPAWN_MULTIPLIER;
+  if (min === 0 && rng() > Math.min(0.68, tunedDensity * 1.15)) return 0;
+  if (min > 0 && rng() > Math.min(0.88, 0.42 + tunedDensity)) min = 0;
   const count = min + Math.floor(rng() * (max - min + 1));
-  return clamp(count, 0, max);
+  return clamp(Math.round(count * ENEMY_SPAWN_MULTIPLIER + (count > 0 && rng() < 0.35 ? 1 : 0)), 0, max);
 }
 
 function shouldGenerateStructure(cx, cy, biome, rng) {
   if (Math.abs(cx) <= 1 && Math.abs(cy) <= 1) return false;
-  const baseChance = biome.parts?.lifeDensity?.id === "empty" ? 0.025 : 0.055;
-  const structureChance = baseChance + Math.min(0.035, (biome.chestChance || 0.4) * 0.03);
+  const baseChance = biome.parts?.lifeDensity?.id === "empty" ? 0.035 : 0.085;
+  const structureChance = baseChance + Math.min(0.04, (biome.chestChance || 0.4) * 0.035);
   return rng() < structureChance;
 }
 
 function createStructure(seed, cx, cy, biome, rng, forcedTypeId = null) {
   const terrainId = biome.parts?.terrainBase?.id || biome.legacyId;
-  const candidates = STRUCTURE_TYPES.filter((type) => type.biomes.includes(terrainId));
+  const candidates = STRUCTURE_TYPES.filter((type) => structureMatchesBiome(type, biome, terrainId));
   const type = forcedTypeId
     ? STRUCTURE_TYPES.find((entry) => entry.id === forcedTypeId) || STRUCTURE_TYPES[0]
-    : choose(rng, candidates.length ? candidates : STRUCTURE_TYPES);
+    : weightedStructurePick(rng, candidates.length ? candidates : STRUCTURE_TYPES);
   const id = `${cx}:${cy}:structure:${type.id}`;
-  const itemCount = 1 + Math.floor(rng() * 2);
+  const itemCount = 1 + Math.floor(rng() * (type.rarity && type.rarity < 0.4 ? 3 : 2));
   const itemSpawns = [];
   for (let index = 0; index < itemCount; index += 1) {
     itemSpawns.push({
       id: choose(rng, type.itemSpawns || type.lootTable || ["apple"]),
       quantity: 1,
-      offsetX: randRange(rng, -34, 34),
-      offsetY: randRange(rng, 34, 76)
+      offsetX: randRange(rng, -Math.max(28, (type.width || 90) * 0.32), Math.max(28, (type.width || 90) * 0.32)),
+      offsetY: randRange(rng, 22, Math.max(42, (type.height || 80) * 0.5))
     });
   }
   const hasBoss = Boolean(type.boss && (forcedTypeId === type.id || rng() < 0.08));
+  const point = randomOpenPoint(cx * CHUNK_SIZE, cy * CHUNK_SIZE, Math.max(120, (type.width || 100) * 0.5), [], rng);
   return {
     id,
     type: type.id,
     name: type.name,
-    x: cx * CHUNK_SIZE + randRange(rng, 120, CHUNK_SIZE - 120),
-    y: cy * CHUNK_SIZE + randRange(rng, 120, CHUNK_SIZE - 120),
+    structureType: type.type || "structure",
+    x: point.x,
+    y: point.y,
+    width: type.width || 96,
+    height: type.height || 88,
     color: type.color,
     biomeId: biome.id,
+    rarity: type.rarity || 1,
+    blocksMovement: Boolean(type.blocksMovement),
+    blocksLineOfSight: Boolean(type.blocksLineOfSight),
+    isEnterable: Boolean(type.isEnterable),
+    interior: type.interior || null,
+    coverRadius: type.coverRadius || Math.max(type.width || 80, type.height || 80) * 0.42,
+    visualParts: type.visualParts || [],
+    codexInfo: type.codexInfo || "",
     lootTable: type.lootTable || [],
     itemSpawns,
     bossId: hasBoss ? type.boss : null,
     discovered: false
   };
+}
+
+function structureMatchesBiome(type, biome, terrainId) {
+  if (type.biomes?.includes(terrainId)) return true;
+  const lightingId = biome.parts?.lightingMood?.id;
+  if (type.id === "angelStatue" && ["bright", "dreamy", "coldBlue"].includes(lightingId)) return true;
+  if (type.id === "spellTower" && ["dreamy", "neonGlow", "dark"].includes(lightingId)) return true;
+  if (type.id === "hiveNest" && biome.parts?.lifeDensity?.id === "infested") return true;
+  return false;
+}
+
+function weightedStructurePick(rng, entries) {
+  const total = entries.reduce((sum, entry) => sum + (entry.rarity || 1), 0);
+  let roll = rng() * total;
+  for (const entry of entries) {
+    roll -= entry.rarity || 1;
+    if (roll <= 0) return entry;
+  }
+  return entries[entries.length - 1];
+}
+
+function randomOpenPoint(originX, originY, margin, structures, rng) {
+  let point = {
+    x: originX + randRange(rng, margin, CHUNK_SIZE - margin),
+    y: originY + randRange(rng, margin, CHUNK_SIZE - margin)
+  };
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (!structures.some((structure) => pointInsideStructureArea(point.x, point.y, structure, 42))) return point;
+    point = {
+      x: originX + randRange(rng, margin, CHUNK_SIZE - margin),
+      y: originY + randRange(rng, margin, CHUNK_SIZE - margin)
+    };
+  }
+  return point;
+}
+
+function pointInsideStructureArea(x, y, structure, padding = 0) {
+  const bounds = structureBounds(structure, padding);
+  return x >= bounds.left && x <= bounds.right && y >= bounds.top && y <= bounds.bottom;
+}
+
+function structureBounds(structure, padding = 0) {
+  const halfW = (structure.width || 84) / 2 + padding;
+  const halfH = (structure.height || 84) / 2 + padding;
+  return {
+    left: structure.x - halfW,
+    right: structure.x + halfW,
+    top: structure.y - halfH,
+    bottom: structure.y + halfH
+  };
+}
+
+function rectsOverlap(a, b) {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 }
 
 function createBossCreature(rng, biome, id, x, y, boss) {
@@ -562,11 +754,12 @@ function createChestLoot(seed, chestId, biome) {
 
 function chestItemPool(biome) {
   const terrainId = biome.parts?.terrainBase?.id;
-  if (terrainId === "crystalGround") return ["glowFruit", "lightBook", "gravityMarble", "crystalRifle"];
-  if (terrainId === "mushroomSoil" || terrainId === "swamp") return ["strangeMushroom", "poisonBook", "tinySlimeBuddy", "toxicSlimeBomb"];
-  if (terrainId === "boneField" || terrainId === "desert") return ["bonePistol", "shield", "bonePet", "deadCatTail"];
-  if (terrainId === "ashland") return ["fireBook", "windJar", "invisibilityBlanket", "Fire Tooth Material"];
-  return ["apple", "orange", "helmet", "littleMan", "swiftBoots"];
+  if (terrainId === "crystalGround") return ["glowFruit", "lightBook", "gravityMarble", "crystalRifle", "hoverBoard", "tinyUfo"];
+  if (terrainId === "mushroomSoil" || terrainId === "swamp") return ["strangeMushroom", "poisonBook", "tinySlimeBuddy", "toxicSlimeBomb", "slimeScooter"];
+  if (terrainId === "boneField" || terrainId === "desert") return ["bonePistol", "shield", "bonePet", "deadCatTail", "boneBike"];
+  if (terrainId === "ashland") return ["fireBook", "windJar", "invisibilityBlanket", "Fire Tooth Material", "boneBike"];
+  if (terrainId === "snowfield") return ["iceBook", "windGlider", "hoverBoard", "Ice Shards"];
+  return ["apple", "orange", "helmet", "littleMan", "swiftBoots", "bicycle"];
 }
 
 function labelize(value) {

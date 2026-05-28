@@ -1,5 +1,5 @@
 import { BIOMES, CREATURE_PARTS } from "./data.js";
-import { maybe } from "./random.js";
+import { maybe, randRange } from "./random.js";
 
 const OPTIONAL_CHANCE = {
   head: 0.72,
@@ -351,6 +351,13 @@ export function generateCreatureSpec(rng, biomeProfileOrId, id, x, y) {
     slowTimer: 0,
     hurtTimer: 0,
     tamePulse: 0,
+    aiState: "idle",
+    seesPlayer: false,
+    lastSeenX: x,
+    lastSeenY: y,
+    memoryTimer: 0,
+    searchTimer: 0,
+    lostTimer: 0,
     dead: false,
     name: profile.name,
     parts,
@@ -381,6 +388,7 @@ function generateProfile(rng, biome, bodyType, parts, id, x, y) {
   const isTameable = Boolean(temperament.tameable && bodyType.tameItem && !tier.id.includes("Invincible") && !hiveMindId);
   const colorPalette = makePalette(bodyType, biome, details, temperament, tier);
   const name = nameCreatureProfile(bodyType, headType, faceType, details, temperament, tier);
+  const perception = buildPerceptionTraits(rng, biome, bodyType, faceType, temperament, details);
 
   return {
     name,
@@ -416,6 +424,7 @@ function generateProfile(rng, biome, bodyType, parts, id, x, y) {
     speedTier: tier.id,
     healthTier: tier.id,
     isInvincible: tier.id === "nearInvincible",
+    perception,
     specialTraits: unique([
       bodyType.shape,
       ...detailIds(details),
@@ -431,6 +440,48 @@ function generateProfile(rng, biome, bodyType, parts, id, x, y) {
     lootTable: buildLootTable(bodyType, biome, details, tier),
     originX: x,
     originY: y
+  };
+}
+
+function buildPerceptionTraits(rng, biome, bodyType, faceType, temperament, details) {
+  const blind = faceType.id === "noEyes" || faceType.id === "noFace";
+  let sightRange = blind ? 80 : 190 + rng() * 140;
+  let sightAngle = blind ? Math.PI * 0.35 : Math.PI * randRange(rng, 0.34, 0.86);
+  let hearingRange = blind ? 210 + rng() * 140 : 90 + rng() * 120;
+  let memoryDuration = randRange(rng, 1.2, 3.8);
+  let searchDuration = randRange(rng, 1.4, 4.4);
+  let visionQuality = blind ? "blind" : rng() < 0.28 ? "poor" : rng() < 0.68 ? "normal" : "sharp";
+  const detailIds = details.map((detail) => detail.id);
+
+  if (faceType.id === "threeEyes" || faceType.id === "glowingFace") {
+    sightRange += 90;
+    sightAngle += 0.32;
+    visionQuality = "sharp";
+  }
+  if (faceType.id === "oneEye") {
+    sightRange += 75;
+    sightAngle *= 0.74;
+  }
+  if (["bat", "floatingOrb"].includes(bodyType.id)) {
+    hearingRange += 120;
+    sightAngle += 0.2;
+  }
+  if (["ambusher", "territorial", "hive"].includes(temperament.id)) {
+    memoryDuration += 1.1;
+    searchDuration += 1.3;
+  }
+  if (detailIds.includes("glowingVeins") || detailIds.includes("crystals")) sightRange += 50;
+  if ((biome.weather === "fog" || biome.weather === "snowstorm" || biome.weather === "dust storm") && visionQuality !== "sharp") sightRange *= 0.8;
+
+  return {
+    sightRange: Math.round(sightRange),
+    sightAngle: Number(clampValue(sightAngle, Math.PI * 0.25, Math.PI * 1.45).toFixed(2)),
+    hearingRange: Math.round(hearingRange),
+    memoryDuration: Number(memoryDuration.toFixed(2)),
+    searchDuration: Number(searchDuration.toFixed(2)),
+    visionQuality,
+    seesThroughFog: visionQuality === "sharp" || detailIds.includes("glowingVeins"),
+    blind
   };
 }
 
@@ -1167,6 +1218,10 @@ function detailIds(details) {
 
 function unique(values) {
   return [...new Set(values.filter(Boolean))];
+}
+
+function clampValue(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function ellipse(ctx, x, y, rx, ry, rotation) {
