@@ -315,11 +315,11 @@ const TEMPERAMENTS = [
 ];
 
 const HEALTH_TIERS = [
-  { id: "tiny", label: "Tiny/Weak", hp: 0.66, speed: 1.18, damage: 0.78, size: 0.82, chance: 0.18 },
-  { id: "normal", label: "Normal", hp: 1, speed: 1, damage: 1, size: 1, chance: 0.56 },
-  { id: "tough", label: "Tough", hp: 1.45, speed: 0.9, damage: 1.16, size: 1.12, chance: 0.17 },
-  { id: "giant", label: "Giant", hp: 2.1, speed: 0.72, damage: 1.4, size: 1.45, chance: 0.08 },
-  { id: "nearInvincible", label: "Nearly Invincible", hp: 12, speed: 0.42, damage: 1.1, size: 1.25, chance: 0.01 }
+  { id: "tiny", label: "Tiny/Weak", hp: 0.66, speed: 1.18, damage: 0.78, size: 0.82, chance: 0.24 },
+  { id: "normal", label: "Normal", hp: 1, speed: 1, damage: 1, size: 1, chance: 0.61 },
+  { id: "tough", label: "Tough", hp: 1.45, speed: 0.9, damage: 1.16, size: 1.12, chance: 0.12 },
+  { id: "giant", label: "Giant", hp: 2.1, speed: 0.72, damage: 1.4, size: 1.45, chance: 0.027 },
+  { id: "nearInvincible", label: "Nearly Invincible", hp: 12, speed: 0.42, damage: 1.1, size: 1.25, chance: 0.003 }
 ];
 
 export function generateCreatureSpec(rng, biomeProfileOrId, id, x, y) {
@@ -485,6 +485,7 @@ function bodyTypeWeight(biome) {
   return Object.fromEntries(
     BODY_TYPES.map((body) => {
       let weight = 1;
+      if (body.id === "giantHeavy") weight *= 0.18;
       const terrainId = biome.parts?.terrainBase?.id || biome.legacyId;
       if (body.biomes.includes(terrainId)) weight *= 2.8;
       if (biome.creatureRules?.bias?.wings && body.canFly) weight *= biome.creatureRules.bias.wings;
@@ -1007,6 +1008,7 @@ function buildLootTable(bodyType, biome, details, tier) {
   if (bodyType.id === "bat") {
     addDrop("Wing Scraps", 0.62, 1, 2);
     addDrop("Glow Spores", 0.36, 1, 2);
+    addDrop("littleBird", 0.08, 1, 1);
   }
   if (bodyType.id === "caterpillar") {
     addDrop("Leaves", 0.58, 1, 3);
@@ -1022,6 +1024,7 @@ function buildLootTable(bodyType, biome, details, tier) {
   if (bodyType.id === "crystal" || bodyType.id === "floatingOrb") {
     addDrop("Crystals", 0.6, 1, 3);
     addDrop("Glow Spores", 0.36, 1, 2);
+    addDrop("gravityMarble", 0.06, 1, 1);
   }
   if (["boneBeast", "skull", "worm"].includes(bodyType.id)) {
     addDrop("Bone", 0.58, 1, 3);
@@ -1032,10 +1035,12 @@ function buildLootTable(bodyType, biome, details, tier) {
     addDrop("Leaves", 0.25, 1, 2);
   }
   if (bodyType.id === "bird") addDrop("Wing Scraps", 0.42, 1, 2);
+  if (bodyType.id === "bird") addDrop("littleBird", 0.1, 1, 1);
   if (bodyType.id === "spider" || bodyType.id === "tinyBug") addDrop("Silk", 0.38, 1, 2);
   if (bodyType.id === "giantHeavy") addDrop("Metal Scraps", 0.2, 1, 2);
 
   if (details.some((detail) => detail.id === "poisonSacs")) addDrop("Poison Sac", 0.42, 1, 2);
+  if (details.some((detail) => detail.id === "poisonSacs")) addDrop("toxicSlimeBomb", 0.08, 1, 1);
   if (details.some((detail) => detail.id === "glowingVeins")) addDrop("Glow Spores", 0.42, 1, 2);
   if (details.some((detail) => detail.id === "crystals")) addDrop("Crystals", 0.5, 1, 2);
   if (details.some((detail) => detail.id === "scales")) addDrop("Scales", 0.42, 1, 2);

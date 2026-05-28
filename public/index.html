@@ -68,12 +68,12 @@
     </section>
 
     <section id="craftingPanel" class="panel hidden">
-      <div class="panel-title">Crafting</div>
+      <div class="panel-title drag-handle">Crafting</div>
       <div id="recipeList"></div>
     </section>
 
     <section id="inventoryPanel" class="panel hidden">
-      <div class="panel-title">Inventory</div>
+      <div class="panel-title drag-handle">Inventory</div>
       <div id="inventoryDetails" class="tiny">Selected: empty</div>
       <div id="inventoryGrid" class="inventory-grid"></div>
       <div class="panel-title small-title">Hotbar</div>
@@ -81,16 +81,38 @@
     </section>
 
     <section id="creatureInfoPanel" class="panel creature-panel hidden">
+      <div class="panel-title drag-handle">Creature</div>
       <button id="closeCreatureInfoButton" class="icon-button close-button" type="button" aria-label="Close creature info">X</button>
       <div id="creatureInfoContent"></div>
     </section>
 
     <section id="creatureCodexPanel" class="panel codex-panel hidden">
       <button id="closeCodexButton" class="icon-button close-button" type="button" aria-label="Close creature codex">X</button>
-      <div class="panel-title">Creature Codex</div>
-      <button class="codex-tab selected" type="button">Creature</button>
+      <div class="panel-title drag-handle">Codex</div>
+      <div class="codex-tabs">
+        <button id="codexCreaturesTab" class="codex-tab selected" type="button">Creatures</button>
+        <button id="codexItemsTab" class="codex-tab" type="button">Items</button>
+      </div>
       <div id="creatureCodexList" class="codex-list"></div>
       <div id="creatureCodexDetail" class="codex-detail"></div>
+    </section>
+
+    <section id="octagonPanel" class="panel octagon-panel hidden">
+      <button id="closeOctagonButton" class="icon-button close-button" type="button" aria-label="Close crafting octagon">X</button>
+      <div class="panel-title drag-handle">Crafting Octagon</div>
+      <div id="octagonArea" class="octagon-area" aria-label="Crafting Octagon">
+        <button class="octagon-slot" data-octagon-slot="0" type="button"></button>
+        <button class="octagon-slot" data-octagon-slot="1" type="button"></button>
+        <button class="octagon-slot" data-octagon-slot="2" type="button"></button>
+        <button class="octagon-slot" data-octagon-slot="3" type="button"></button>
+        <button id="octagonResult" class="octagon-result" type="button">No result</button>
+        <button class="octagon-slot" data-octagon-slot="4" type="button"></button>
+        <button class="octagon-slot" data-octagon-slot="5" type="button"></button>
+        <button class="octagon-slot" data-octagon-slot="6" type="button"></button>
+        <button class="octagon-slot" data-octagon-slot="7" type="button"></button>
+      </div>
+      <div id="octagonHint" class="tiny">Click inventory items below to place them. Click octagon slots to remove them.</div>
+      <div id="octagonInventory" class="inventory-grid octagon-inventory"></div>
     </section>
 
     <section id="hotbar" aria-label="Hotbar"></section>

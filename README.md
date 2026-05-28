@@ -27,16 +27,17 @@ The same Worker serves the frontend, API, WebSocket route, and Durable Object mu
 Controls:
 
 - `WASD` or arrow keys: move
-- Mouse: aim
-- Left click or `Space`: use the selected hotbar item
+- Mouse: aim/facing direction
+- `Space`: attack or use the selected hotbar item
 - Click a nearby dropped item/resource: pick it up
 - Click a nearby chest: open it
 - Click a nearby creature: identify it and add it to the Creature Codex
 - `1`-`9`: select hotbar slot
 - `Shift` + number: drop from that hotbar slot
 - `E`: toggle full inventory
-- `Q`: toggle Creature Codex
-- `C`: toggle crafting
+- `Q`: toggle Creature/Item Codex
+- `F`: toggle the Crafting Octagon
+- `C`: toggle the old simple crafting panel
 - `F3`: toggle debug overlay
 
 ## Multiplayer Template Source
@@ -67,6 +68,7 @@ Used/adapted pieces:
 - cleaner gameplay HUD with biome/controls details kept in the F3 debug overlay
 - white pickup outlines and proximity glow for dropped items, resources, creature drops, and other collectible items
 - finite 12x12 chunk worlds pregenerated from the world seed before play, with visible world borders
+- reduced enemy density with safer starting chunks, sparse/empty low-spawn biomes, and capped dangerous chunks
 - ten-heart health UI with compact level/XP and held item readouts
 - top-down movement and mouse aim
 - public/private/code multiplayer lobbies with WebSocket player sync
@@ -78,10 +80,17 @@ Used/adapted pieces:
 - hostile, neutral, friendly, tameable, tamed follower, hive mind, flying, fast, tanky, and rare near-invincible creature foundations
 - melee, ranged, laser, spore, poison, fire, spike, charge, swipe, hive signal, burn, slow, and knockback combat hooks
 - Creature Codex with clickable creature inspection, preview images, origin biome data, behavior traits, tameability, and known drops
+- Item Codex with discovered item categories, rarity, effects, stack sizes, spawn sources, crafting tags, and interactions
+- deep item registry with food, weapons, guns, spell books, armor/equipment, followers/summons, creature materials, transformation pieces, and weird utility items
+- temporary buffs, passive equipment, active items, spell effects, follower summons, armor protection, and teleport/push/pull/cloud hooks
+- Crafting Octagon with eight input points, data-driven combinations, non-consumed preview ingredients, and center-result crafting
+- structure foundation with huts, crystal shrines, bone gates, poison wells, spell towers, and broken cat statues that spawn rare items
+- placeholder boss foundation with a rare structure boss, special profile data, larger stats, and special drops
 - flexible creature loot tables with physical drops such as Wing Scraps, Silk, Poison Sac, Scales, Teeth, Meat, Crystals, Ash, and Glow Spores
 - chests with biome-tinted loot and shared opened state
-- five weapons: Stick Sword, Bone Club, Slime Gun, Eye Wand, Fire Tooth
+- expanded weapons including Stick Sword, Bone Club, Slime Gun, Eye Wand, Fire Tooth, Bone Sword, Pineapple Gun, Teleport Gun, Bone Pistol, Crystal Rifle, Orange Launcher, Crystal Light Wand, and Ultra Wand
 - Minecraft-style 9-slot hotbar, full inventory panel, stacked resources/consumables, item dropping, dropped item pickup, crafting, XP, level ups, and optional debug overlay
+- draggable inventory, codex, creature info, simple crafting, and Crafting Octagon panels
 
 ## Cloudflare Notes
 
@@ -106,7 +115,7 @@ npm run deploy
 
 ## Current Limitations
 
-- Enemy AI, taming, hive behavior, creature codex discoveries, and dropped loot are client-side for the prototype. Creature deaths are synced through the shared room state, but full authoritative enemy simulation is a later step.
+- Enemy AI, taming, hive behavior, creature/item codex discoveries, followers, buffs, structures, bosses, and dropped loot are client-side for the prototype. Creature deaths are synced through the shared room state, but full authoritative enemy simulation is a later step.
 - Chest opened state is synced and persisted per room, but loot granting is local to the opener.
 - Dropped items and each player's full inventory are local for this pass; the data shape is ready to sync later.
 - Multiplayer uses template lobbies, not accounts, matchmaking, or persistent profiles.

@@ -185,6 +185,12 @@ input {
   letter-spacing: 0;
 }
 
+.drag-handle {
+  min-height: 24px;
+  cursor: move;
+  user-select: none;
+}
+
 #craftingPanel {
   right: 12px;
   top: 12px;
@@ -214,8 +220,14 @@ input {
 }
 
 .codex-panel > .panel-title,
-.codex-panel > .codex-tab {
+.codex-panel > .codex-tabs {
   grid-column: 1 / -1;
+}
+
+.codex-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .codex-tab {
@@ -258,6 +270,25 @@ input {
   grid-template-columns: 120px 1fr;
   gap: 12px;
   align-items: start;
+}
+
+.item-sheet {
+  display: grid;
+  grid-template-columns: 74px 1fr;
+  gap: 12px;
+  align-items: start;
+}
+
+.item-codex-icon {
+  display: grid;
+  width: 64px;
+  height: 64px;
+  place-items: center;
+  border: 2px solid rgba(255, 255, 255, 0.34);
+  border-radius: 8px;
+  color: rgba(0, 0, 0, 0.62);
+  font-weight: 900;
+  box-shadow: inset 0 -12px 0 rgba(0, 0, 0, 0.18);
 }
 
 .creature-preview {
@@ -313,6 +344,72 @@ input {
   height: 28px;
   padding: 0;
   place-items: center;
+}
+
+.octagon-panel {
+  left: 50%;
+  top: 50%;
+  width: min(620px, calc(100% - 32px));
+  max-height: calc(100% - 36px);
+  overflow: auto;
+  transform: translate(-50%, -50%);
+}
+
+.octagon-area {
+  position: relative;
+  width: min(310px, 72vw);
+  aspect-ratio: 1 / 1;
+  margin: 4px auto 10px;
+}
+
+.octagon-slot,
+.octagon-result {
+  position: absolute;
+  display: grid;
+  width: 62px;
+  min-height: 48px;
+  padding: 4px;
+  place-items: center;
+  border-radius: 8px;
+  background: rgba(12, 16, 24, 0.88);
+}
+
+.octagon-slot.has-item {
+  border-color: #fff2a6;
+}
+
+.octagon-slot.selected {
+  border-color: #8ff3ff;
+  box-shadow: 0 0 0 2px rgba(143, 243, 255, 0.25);
+}
+
+.octagon-result {
+  left: 50%;
+  top: 50%;
+  width: 118px;
+  min-height: 70px;
+  color: #fff2a6;
+  font-size: 12px;
+  transform: translate(-50%, -50%);
+}
+
+.octagon-result.ready {
+  border-color: #8ff3ff;
+  box-shadow: 0 0 0 2px rgba(143, 243, 255, 0.22), 0 0 22px rgba(143, 243, 255, 0.18);
+}
+
+.octagon-slot[data-octagon-slot="0"] { left: 50%; top: 0; transform: translate(-50%, 0); }
+.octagon-slot[data-octagon-slot="1"] { right: 16%; top: 16%; transform: translate(50%, -20%); }
+.octagon-slot[data-octagon-slot="2"] { right: 0; top: 50%; transform: translate(0, -50%); }
+.octagon-slot[data-octagon-slot="3"] { right: 16%; bottom: 16%; transform: translate(50%, 20%); }
+.octagon-slot[data-octagon-slot="4"] { left: 50%; bottom: 0; transform: translate(-50%, 0); }
+.octagon-slot[data-octagon-slot="5"] { left: 16%; bottom: 16%; transform: translate(-50%, 20%); }
+.octagon-slot[data-octagon-slot="6"] { left: 0; top: 50%; transform: translate(0, -50%); }
+.octagon-slot[data-octagon-slot="7"] { left: 16%; top: 16%; transform: translate(-50%, -20%); }
+
+.octagon-inventory {
+  max-height: 190px;
+  overflow: auto;
 }
 
 #hotbar {
@@ -598,6 +695,7 @@ input {
 .game-not-started #inventoryPanel,
 .game-not-started #creatureInfoPanel,
 .game-not-started #creatureCodexPanel,
+.game-not-started #octagonPanel,
 .game-not-started #hotbar,
 .game-not-started #debugOverlay {
   display: none;
@@ -632,6 +730,7 @@ input {
   #hud,
   #craftingPanel,
   #inventoryPanel,
+  #octagonPanel,
   .creature-panel,
   .codex-panel {
     left: 8px;
@@ -643,7 +742,8 @@ input {
     top: 8px;
   }
 
-  #inventoryPanel {
+  #inventoryPanel,
+  #octagonPanel {
     left: 8px;
     right: 8px;
     transform: translateY(-50%);
@@ -656,6 +756,10 @@ input {
   }
 
   .creature-sheet {
+    grid-template-columns: 1fr;
+  }
+
+  .item-sheet {
     grid-template-columns: 1fr;
   }
 

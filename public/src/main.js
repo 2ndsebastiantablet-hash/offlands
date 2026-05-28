@@ -1,4 +1,4 @@
-import { ITEM_DEFS, RECIPES, RESOURCE_COLORS, RESOURCES, WEAPONS } from "./data.js";
+import { ITEM_DEFS, OCTAGON_RECIPES, RECIPES, RESOURCE_COLORS, RESOURCES, WEAPONS } from "./data.js";
 import { drawCreature } from "./creatures.js";
 import { CHUNK_SIZE, WORLD_CHUNKS_TALL, WORLD_CHUNKS_WIDE, World } from "./world.js";
 import { MultiplayerClient } from "../frontend/multiplayer-client.js";
@@ -43,6 +43,13 @@ const creatureCodexPanel = document.getElementById("creatureCodexPanel");
 const creatureCodexList = document.getElementById("creatureCodexList");
 const creatureCodexDetail = document.getElementById("creatureCodexDetail");
 const closeCodexButton = document.getElementById("closeCodexButton");
+const codexCreaturesTab = document.getElementById("codexCreaturesTab");
+const codexItemsTab = document.getElementById("codexItemsTab");
+const octagonPanel = document.getElementById("octagonPanel");
+const closeOctagonButton = document.getElementById("closeOctagonButton");
+const octagonResult = document.getElementById("octagonResult");
+const octagonInventory = document.getElementById("octagonInventory");
+const octagonHint = document.getElementById("octagonHint");
 const multiplayerStatus = document.getElementById("multiplayerStatus");
 const nameInput = document.getElementById("nameInput");
 const codeInput = document.getElementById("codeInput");
@@ -85,8 +92,17 @@ const state = {
   dropSeq: 0,
   inventoryOpen: false,
   codexOpen: false,
+  octagonOpen: false,
+  selectedOctagonSlot: null,
   selectedCreatureId: null,
+  selectedItemId: null,
+  codexTab: "creatures",
   creatureCodex: new Map(),
+  discoveredItems: new Set(["stickSword"]),
+  octagonSlots: createSlots(8),
+  octagonResult: null,
+  followers: [],
+  followerSeq: 0,
   serverPrivacy: "public",
   publicLobbies: [],
   lastStatePush: 0,
@@ -108,6 +124,9 @@ const state = {
     inventorySlots: createSlots(27),
     selectedHotbar: 0,
     inventory: Object.fromEntries(RESOURCES.map((name) => [name, 0])),
+    equipment: {},
+    buffs: {},
+    buffStrengths: {},
     cooldown: 0,
     hurtTimer: 0,
     respawnTimer: 0
@@ -177,13 +196,22 @@ function prepareNewWorld(seed = state.worldSeed) {
   state.floatingText.length = 0;
   state.droppedItems.length = 0;
   state.markers.length = 0;
+  state.followers.length = 0;
+  state.octagonSlots = createSlots(8);
+  state.octagonResult = null;
+  state.selectedOctagonSlot = null;
   state.creatureCodex.clear();
+  state.discoveredItems = new Set(["stickSword"]);
   state.selectedCreatureId = null;
+  state.selectedItemId = null;
   state.player.x = 320;
   state.player.y = 320;
   state.player.vx = 0;
   state.player.vy = 0;
   state.player.hp = state.player.maxHp;
+  state.player.buffs = {};
+  state.player.buffStrengths = {};
+  spawnStructureItems();
   updateCamera(1);
 }
 
@@ -206,6 +234,7 @@ function returnToMenu() {
   input.mouse.down = false;
   setInventoryOpen(false);
   setCodexOpen(false);
+  setOctagonOpen(false);
   closeCreatureInfo();
   mainMenu.classList.remove("hidden");
   craftingPanel.classList.add("hidden");
@@ -220,7 +249,7 @@ function selectedHotbarStack() {
 
 function activeItem() {
   const stack = selectedHotbarStack();
-  return stack ? ITEM_DEFS[stack.id] : null;
+  return stack ? itemDef(stack.id) : null;
 }
 
 function activeWeapon() {
@@ -468,16 +497,25 @@ function update(dt, now) {
   input.mouse.worldX = screenToWorld(input.mouse.x, input.mouse.y).x;
   input.mouse.worldY = screenToWorld(input.mouse.x, input.mouse.y).y;
 
+  if (simulationPaused()) {
+    input.attackQueued = false;
+    input.pickupQueued = false;
+    input.mouse.down = false;
+    updateHud();
+    return;
+  }
+
   if (player.respawnTimer > 0) {
     player.respawnTimer -= dt;
     if (player.respawnTimer <= 0) respawnPlayer();
   } else {
+    updateBuffs(dt);
     movePlayer(dt);
     updateHazardEffects(dt);
     clampPlayerToWorld();
     const handledClick = input.pickupQueued && handleWorldClick(input.mouse.worldX, input.mouse.worldY);
     if (handledClick) input.mouse.down = false;
-    if (!handledClick && (input.attackQueued || input.mouse.down)) useSelectedItem(now);
+    if (input.attackQueued) useSelectedItem(now);
   }
   input.attackQueued = false;
   input.pickupQueued = false;
@@ -488,10 +526,19 @@ function update(dt, now) {
   const chunks = state.world.nearbyChunks(player.x, player.y, 2);
   for (const chunk of chunks) updateCreatures(chunk, dt);
   updateProjectiles(dt);
+  updateFollowers(dt);
   updateEffects(dt);
   updateCamera(dt);
   maybePushMultiplayer(now);
   updateHud();
+}
+
+function simulationPaused() {
+  return state.codexOpen ||
+    state.inventoryOpen ||
+    state.octagonOpen ||
+    !craftingPanel.classList.contains("hidden") ||
+    !creatureInfoPanel.classList.contains("hidden");
 }
 
 function movePlayer(dt) {
@@ -506,7 +553,7 @@ function movePlayer(dt) {
   const biome = currentBiome();
   const mods = biome.gameplayModifiers || {};
   const hazardMove = playerHazardMoveMultiplier();
-  const speed = player.baseSpeed * (mods.playerSpeed || 1) * hazardMove;
+  const speed = player.baseSpeed * (mods.playerSpeed || 1) * hazardMove * playerSpeedMultiplier();
   const inertia = mods.inertia || 0;
   const windPush = biome.wind?.strength || 0;
 
@@ -553,6 +600,38 @@ function clampPlayerToWorld() {
   }
 }
 
+function updateBuffs(dt) {
+  for (const [buff, remaining] of Object.entries(state.player.buffs || {})) {
+    const next = remaining - dt;
+    if (next <= 0) delete state.player.buffs[buff];
+    else state.player.buffs[buff] = next;
+  }
+}
+
+function playerSpeedMultiplier() {
+  let multiplier = 1;
+  if (state.player.buffs.speed > 0) multiplier *= state.player.buffStrengths?.speed || 1.35;
+  if (state.player.buffs.catForm > 0) multiplier *= 1.35;
+  for (const itemId of Object.values(state.player.equipment || {})) {
+    for (const effect of itemDef(itemId).effects || []) {
+      if (effect.type === "speedPassive") multiplier *= effect.amount || 1;
+      if (effect.type === "flight") multiplier *= 1.05;
+    }
+  }
+  return multiplier;
+}
+
+function armorReduction() {
+  let reduction = 0;
+  for (const itemId of Object.values(state.player.equipment || {})) {
+    for (const effect of itemDef(itemId).effects || []) {
+      if (effect.type === "armor") reduction += effect.amount || 0;
+    }
+  }
+  if (state.player.buffs.catForm > 0) reduction += 0.08;
+  return clamp(reduction, 0, 0.55);
+}
+
 function playerHazardMoveMultiplier() {
   let multiplier = 1;
   for (const chunk of state.world.nearbyChunks(state.player.x, state.player.y, 1)) {
@@ -594,27 +673,191 @@ function useSelectedItem(now) {
     if (input.attackQueued) setStatus("Selected hotbar slot is empty.", 1);
     return;
   }
-  if (item?.type === "consumable" && stack?.id === "healingPack") {
-    if (state.player.hp >= state.player.maxHp) {
-      setStatus("Health is already full.", 1.1);
-      return;
+  discoverItem(stack.id);
+  if (item.useType === "consume") return useConsumableItem(item);
+  if (item.useType === "equip") return equipItem(item);
+  if (item.useType === "place") return placeItem(item);
+  if (item.useType === "summon") return useSummonItem(item);
+  if (item.useType === "spell" || item.useType === "active") return useActiveItem(item, now);
+  if (item.type === "weapon") return attack(now);
+  if (input.attackQueued) setStatus(`${item.name} is not directly usable.`, 1);
+}
+
+function useConsumableItem(item) {
+  let used = false;
+  for (const effect of item.effects || []) {
+    used = applyItemEffect(effect, item) || used;
+  }
+  if (!used) {
+    setStatus(`${item.name} does nothing yet.`, 1.2);
+    return;
+  }
+  removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
+  setStatus(`Used ${item.name}.`);
+}
+
+function equipItem(item) {
+  const slot = item.equipmentSlot || "trinket";
+  state.player.equipment[slot] = item.id;
+  setStatus(`Equipped ${item.name}.`);
+}
+
+function placeItem(item) {
+  state.markers.push({ x: state.player.x, y: state.player.y, label: item.name });
+  removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
+  setStatus(`Placed ${item.name}.`);
+}
+
+function useSummonItem(item) {
+  let count = 1;
+  let followerType = item.id;
+  let damage = 4;
+  let shield = 0;
+  for (const effect of item.effects || []) {
+    if (effect.type !== "follower") continue;
+    count = effect.count || count;
+    followerType = effect.follower || followerType;
+    damage = effect.damage || damage;
+    shield = effect.shield || shield;
+  }
+  for (let index = 0; index < count; index += 1) summonFollower(followerType, item, damage, shield, index);
+  removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
+  setStatus(`${item.name} joined your little orbit.`);
+}
+
+function useActiveItem(item, now) {
+  if (state.player.cooldown > 0) return;
+  state.player.cooldown = item.useType === "spell" ? 520 : 420;
+  let consumed = false;
+  for (const effect of item.effects || []) {
+    const result = applyItemEffect(effect, item);
+    consumed = consumed || Boolean(effect.consume && result);
+  }
+  if (consumed) removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
+  if (state.connected) state.multiplayer?.pushState(playerStatePayload(), playerMetaPayload());
+}
+
+function applyItemEffect(effect, item) {
+  const player = state.player;
+  const aim = normalize(input.mouse.worldX - player.x, input.mouse.worldY - player.y);
+  if (effect.type === "heal") {
+    if (player.hp >= player.maxHp) return false;
+    player.hp = Math.min(player.maxHp, player.hp + effect.amount);
+    return true;
+  }
+  if (effect.type === "buff") {
+    player.buffs[effect.buff] = Math.max(player.buffs[effect.buff] || 0, effect.duration || 6);
+    if (effect.amount) player.buffStrengths[effect.buff] = effect.amount;
+    addFloatingText(effect.buff, player.x, player.y - 38, item.color || "#ffffff");
+    return true;
+  }
+  if (effect.type === "random") {
+    const choice = effect.options[Math.floor(Math.random() * effect.options.length)];
+    return applyItemEffect(choice === "heal"
+      ? { type: "heal", amount: 16 }
+      : { type: "buff", buff: choice === "jump" ? "speed" : choice, amount: choice === "speed" ? 1.35 : 1, duration: 6 }, item);
+  }
+  if (effect.type === "teleport") {
+    teleportPlayer(effect.distance || 170, aim);
+    return true;
+  }
+  if (effect.type === "push" || effect.type === "pull") {
+    pushCreatures(effect.radius || 150, effect.amount || 120, effect.type === "pull" ? -1 : 1);
+    state.effects.push({ type: "spore", x: player.x, y: player.y, radius: effect.radius || 150, color: "rgba(190, 225, 255, 0.18)", life: 0.45, maxLife: 0.45 });
+    return true;
+  }
+  if (effect.type === "cloud") {
+    const x = player.x + aim.x * 58;
+    const y = player.y + aim.y * 58;
+    state.effects.push({ type: "spore", x, y, radius: effect.radius || 90, color: "rgba(142, 241, 94, 0.22)", life: 1.3, maxLife: 1.3 });
+    applyAreaDamage(x, y, effect.radius || 90, effect.damage || 8, { id: item.id, knockback: 35 });
+    return true;
+  }
+  if (effect.type === "flash") {
+    state.effects.push({ type: "spore", x: player.x, y: player.y, radius: effect.radius || 130, color: "rgba(255, 245, 170, 0.24)", life: 0.42, maxLife: 0.42 });
+    applyAreaDamage(player.x, player.y, effect.radius || 130, effect.damage || 12, { id: item.id, knockback: 80 });
+    return true;
+  }
+  if (effect.type === "spellProjectile") {
+    state.projectiles.push({
+      x: player.x + aim.x * 24,
+      y: player.y + aim.y * 24,
+      vx: aim.x * 520,
+      vy: aim.y * 520,
+      damage: scaledDamage(effect.damage || 14),
+      traveled: 0,
+      range: 500,
+      radius: effect.element === "fire" ? 8 : 6,
+      color: item.color,
+      effect: item.id,
+      burn: effect.burn || 0,
+      slow: effect.slow || 0,
+      glow: 1.25
+    });
+    return true;
+  }
+  if (effect.type === "recallFollowers") {
+    for (const follower of state.followers) {
+      follower.x = player.x + randVisualOffset();
+      follower.y = player.y + randVisualOffset();
     }
-    state.player.hp = Math.min(state.player.maxHp, state.player.hp + 25);
-    removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
-    setStatus("Used Healing Fruit Pack.");
-    return;
+    return true;
   }
-  if (item?.type === "placeable" && stack?.id === "campMarker") {
-    state.markers.push({ x: state.player.x, y: state.player.y });
-    removeFromSlot(state.player.hotbar, state.player.selectedHotbar, 1);
-    setStatus("Placed a Camp Marker.");
-    return;
+  return false;
+}
+
+function teleportPlayer(distanceAmount, aim) {
+  const target = state.world.clampPosition(
+    state.player.x + aim.x * distanceAmount,
+    state.player.y + aim.y * distanceAmount,
+    state.player.radius + 8
+  );
+  state.effects.push({ type: "spore", x: state.player.x, y: state.player.y, radius: 70, color: "rgba(125, 241, 255, 0.18)", life: 0.35, maxLife: 0.35 });
+  state.player.x = target.x;
+  state.player.y = target.y;
+  state.effects.push({ type: "spore", x: state.player.x, y: state.player.y, radius: 90, color: "rgba(125, 241, 255, 0.22)", life: 0.5, maxLife: 0.5 });
+  setStatus("Teleported.");
+}
+
+function pushCreatures(radius, amount, directionScale) {
+  for (const creature of nearbyCreatures()) {
+    if (creature.dead || state.deadCreatures.has(creature.id)) continue;
+    const dist = distance(creature, state.player);
+    if (dist > radius) continue;
+    const dir = normalize(creature.x - state.player.x, creature.y - state.player.y);
+    const force = (1 - dist / radius) * amount * directionScale;
+    creature.x += dir.x * force;
+    creature.y += dir.y * force;
   }
-  if (item.type !== "weapon") {
-    if (input.attackQueued) setStatus(`${item.name} is not a weapon.`, 1);
-    return;
+}
+
+function applyAreaDamage(x, y, radius, damage, weapon) {
+  for (const creature of nearbyCreatures()) {
+    if (creature.dead || state.deadCreatures.has(creature.id)) continue;
+    const dist = Math.hypot(creature.x - x, creature.y - y);
+    if (dist > radius) continue;
+    damageCreature(creature, scaledDamage(damage), weapon, normalize(creature.x - x, creature.y - y));
   }
-  attack(now);
+}
+
+function summonFollower(type, item, damage, shield, index = 0) {
+  state.followerSeq += 1;
+  state.followers.push({
+    id: `follower:${Date.now()}:${state.followerSeq}`,
+    type,
+    name: item.name,
+    x: state.player.x - 28 + index * 18,
+    y: state.player.y + 36 + index * 8,
+    color: item.color || "#ffd782",
+    damage,
+    shield,
+    cooldown: 0,
+    bob: Math.random() * Math.PI * 2
+  });
+}
+
+function randVisualOffset() {
+  return -22 + Math.random() * 44;
 }
 
 function attack(now) {
@@ -624,6 +867,10 @@ function attack(now) {
   player.cooldown = weapon.cooldown;
   state.attackSeq += 1;
   const aim = normalize(input.mouse.worldX - player.x, input.mouse.worldY - player.y);
+  if (weapon.id === "teleportGun") {
+    teleportPlayer(weapon.range || 240, aim);
+    return;
+  }
   state.effects.push({ type: "swing", x: player.x, y: player.y, aim, weapon, life: 0.16, maxLife: 0.16 });
   const biome = currentBiome();
   const projectileRange = biome.gameplayModifiers?.projectileRange || 1;
@@ -734,6 +981,21 @@ function killCreature(creature) {
 
 function randDropOffset(rng) {
   return -16 + rng() * 32;
+}
+
+function spawnStructureItems() {
+  spawnDroppedItem("apple", 2, 350, 310);
+  spawnDroppedItem("orange", 1, 370, 338);
+  spawnDroppedItem("helmet", 1, 302, 355);
+  spawnDroppedItem("fireBook", 1, 275, 320);
+  spawnDroppedItem("littleMan", 1, 330, 370);
+  for (const chunk of state.world.allChunks()) {
+    for (const structure of chunk.structures || []) {
+      for (const item of structure.itemSpawns || []) {
+        spawnDroppedItem(item.id, item.quantity || 1, structure.x + item.offsetX, structure.y + item.offsetY);
+      }
+    }
+  }
 }
 
 function nearbyCreatures() {
@@ -882,6 +1144,7 @@ function clampCreatureMovement(creature, chunk) {
 
 function isCreatureHostile(creature, playerDist = Infinity) {
   const profile = creature.profile || {};
+  if (state.player.buffs.invisible > 0 || state.player.buffs.catForm > 0) return false;
   if (profile.isTamed || profile.isFriendly) return false;
   if (creature.hiveAlertTimer > 0) return true;
   if (["hostile", "hive", "ambusher"].includes(profile.behaviorType)) return true;
@@ -994,6 +1257,28 @@ function updateProjectiles(dt) {
   updateProjectileList(state.enemyProjectiles, dt, false);
 }
 
+function updateFollowers(dt) {
+  for (const follower of state.followers) {
+    follower.cooldown = Math.max(0, follower.cooldown - dt);
+    const target = findNearestHostileCreature(follower, 190);
+    const followTarget = target || state.player;
+    const desiredDistance = target ? 28 : 58;
+    const dx = followTarget.x - follower.x;
+    const dy = followTarget.y - follower.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > desiredDistance) {
+      const dir = normalize(dx, dy);
+      follower.x += dir.x * 135 * dt;
+      follower.y += dir.y * 135 * dt;
+    }
+    if (target && dist < 46 && follower.cooldown <= 0) {
+      follower.cooldown = 0.9;
+      damageCreature(target, follower.damage || 4, { id: "follower", knockback: 45 }, normalize(target.x - follower.x, target.y - follower.y), "ally");
+      addFloatingText("peck", follower.x, follower.y - 16, follower.color);
+    }
+  }
+}
+
 function updateProjectileList(list, dt, fromPlayer) {
   for (let index = list.length - 1; index >= 0; index -= 1) {
     const projectile = list[index];
@@ -1014,6 +1299,8 @@ function updateProjectileList(list, dt, fromPlayer) {
         if (creature.dead || state.deadCreatures.has(creature.id)) continue;
         if (distance(projectile, creature) < projectile.radius + 20) {
           damageCreature(creature, projectile.damage, WEAPONS[projectile.effect] || WEAPONS.eyeWand, normalize(projectile.vx, projectile.vy));
+          if (projectile.slow) creature.slowTimer = Math.max(creature.slowTimer || 0, projectile.slow);
+          if (projectile.burn) creature.burnTimer = Math.max(creature.burnTimer || 0, projectile.burn);
           remove = true;
           break;
         }
@@ -1029,14 +1316,15 @@ function updateProjectileList(list, dt, fromPlayer) {
 
 function hurtPlayer(amount, dir, knockback = true) {
   const player = state.player;
-  if (player.respawnTimer > 0) return;
-  player.hp -= amount;
+  if (player.respawnTimer > 0 || simulationPaused()) return;
+  const finalAmount = Math.max(1, amount * (1 - armorReduction()));
+  player.hp -= finalAmount;
   player.hurtTimer = 0.25;
   if (knockback) {
     player.x += dir.x * 12;
     player.y += dir.y * 12;
   }
-  addFloatingText(`-${Math.round(amount)}`, player.x, player.y - 30, "#ffb0a8");
+  addFloatingText(`-${Math.round(finalAmount)}`, player.x, player.y - 30, "#ffb0a8");
   if (player.hp <= 0) {
     player.hp = 0;
     player.respawnTimer = 2.2;
@@ -1183,11 +1471,19 @@ function setCodexOpen(open) {
   creatureCodexPanel?.classList.toggle("hidden", !open);
   if (open) {
     renderCreatureCodex();
-    if (!state.selectedCreatureId && state.creatureCodex.size) {
+    if (state.codexTab === "creatures" && !state.selectedCreatureId && state.creatureCodex.size) {
       state.selectedCreatureId = [...state.creatureCodex.keys()][0];
     }
-    renderCreatureCodexDetail(state.creatureCodex.get(state.selectedCreatureId));
+    if (state.codexTab === "creatures") renderCreatureCodexDetail(state.creatureCodex.get(state.selectedCreatureId));
+    else renderItemCodexDetail(state.selectedItemId);
   }
+}
+
+function setCodexTab(tab) {
+  state.codexTab = tab;
+  codexCreaturesTab?.classList.toggle("selected", tab === "creatures");
+  codexItemsTab?.classList.toggle("selected", tab === "items");
+  renderCreatureCodex();
 }
 
 function renderCreatureInfoPanel(creature) {
@@ -1198,6 +1494,10 @@ function renderCreatureInfoPanel(creature) {
 
 function renderCreatureCodex() {
   if (!creatureCodexList) return;
+  if (state.codexTab === "items") {
+    renderItemCodex();
+    return;
+  }
   creatureCodexList.innerHTML = "";
   if (!state.creatureCodex.size) {
     creatureCodexList.innerHTML = `<div class="tiny">No creatures discovered yet. Click a nearby creature to identify it.</div>`;
@@ -1222,6 +1522,33 @@ function renderCreatureCodex() {
   }
 }
 
+function renderItemCodex() {
+  creatureCodexList.innerHTML = "";
+  const items = [...state.discoveredItems].map(itemDef).sort((a, b) => a.name.localeCompare(b.name));
+  if (!items.length) {
+    creatureCodexList.innerHTML = `<div class="tiny">No items discovered yet. Pick up a dropped item to log it.</div>`;
+    if (creatureCodexDetail) creatureCodexDetail.innerHTML = "";
+    return;
+  }
+  if (!state.selectedItemId || !state.discoveredItems.has(state.selectedItemId)) state.selectedItemId = items[0].id;
+  for (const item of items) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `codex-entry${item.id === state.selectedItemId ? " selected" : ""}`;
+    button.innerHTML = `
+      <span class="slot-icon" style="background:${escapeHtml(item.color || "#ffffff")}"></span>
+      <span>${escapeHtml(item.name)}</span>
+    `;
+    button.addEventListener("click", () => {
+      state.selectedItemId = item.id;
+      renderItemCodex();
+      renderItemCodexDetail(item.id);
+    });
+    creatureCodexList.append(button);
+  }
+  renderItemCodexDetail(state.selectedItemId);
+}
+
 function renderCreatureCodexDetail(creature) {
   if (!creatureCodexDetail) return;
   if (!creature) {
@@ -1230,6 +1557,48 @@ function renderCreatureCodexDetail(creature) {
   }
   creatureCodexDetail.innerHTML = creatureSheetHtml(creature, "creatureCodexPreview");
   renderCreaturePreview(document.getElementById("creatureCodexPreview"), creature, 0.7);
+}
+
+function renderItemCodexDetail(itemId) {
+  if (!creatureCodexDetail) return;
+  if (!itemId) {
+    creatureCodexDetail.innerHTML = `<div class="tiny">Select a discovered item.</div>`;
+    return;
+  }
+  const item = itemDef(itemId);
+  const effects = (item.effects || []).map((effect) => effectText(effect)).join(", ") || "No active effect";
+  const sources = (item.spawnRules || []).map((rule) => `${rule.source}${rule.condition ? ` (${rule.condition})` : ""}`).join(", ") || "Future-only";
+  const tags = (item.craftingTags || []).join(", ") || "none";
+  const interactions = (item.interactions || []).join(", ") || "none";
+  creatureCodexDetail.innerHTML = `
+    <div class="panel-title">${escapeHtml(item.name)}</div>
+    <div class="item-sheet">
+      <span class="item-codex-icon" style="background:${escapeHtml(item.color || "#ffffff")}">${escapeHtml(item.icon || item.name[0] || "?")}</span>
+      <div class="creature-facts">
+        <span><strong>Category</strong><br>${escapeHtml(item.category || item.type)}</span>
+        <span><strong>Subcategory</strong><br>${escapeHtml(item.subcategory || "none")}</span>
+        <span><strong>Rarity</strong><br>${escapeHtml(item.rarity || "common")}</span>
+        <span><strong>Use</strong><br>${escapeHtml(item.useType || item.type)}</span>
+        <span><strong>Equipment Slot</strong><br>${escapeHtml(item.equipmentSlot || "none")}</span>
+        <span><strong>Stack</strong><br>${item.stackable ? `Up to ${item.maxStack || 99}` : "Does not stack"}</span>
+        <span class="trait-list"><strong>Description</strong><br>${escapeHtml(item.description || item.codexInfo || "")}</span>
+        <span class="trait-list"><strong>Effects</strong><br>${escapeHtml(effects)}</span>
+        <span class="trait-list"><strong>Spawn Sources</strong><br>${escapeHtml(sources)}</span>
+        <span class="trait-list"><strong>Crafting Tags</strong><br>${escapeHtml(tags)}</span>
+        <span class="trait-list"><strong>Interactions</strong><br>${escapeHtml(interactions)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function effectText(effect) {
+  if (effect.type === "heal") return `heal ${effect.amount}`;
+  if (effect.type === "buff") return `${effect.buff} ${effect.duration || 0}s`;
+  if (effect.type === "weapon") return `${effect.weaponType} damage ${effect.damage}`;
+  if (effect.type === "follower") return `summon ${effect.count || 1} ${effect.follower}`;
+  if (effect.type === "spellProjectile") return `${effect.element} projectile`;
+  if (effect.type === "armor") return `${Math.round(effect.amount * 100)}% protection`;
+  return labelize(effect.type);
 }
 
 function creatureSheetHtml(creature, previewId) {
@@ -1302,6 +1671,7 @@ function openChest(chest) {
   state.openedChests.add(chest.id);
   const loot = chest.loot || rollChestLoot(chest);
   for (const [resource, amount] of Object.entries(loot.resources)) addResource(resource, amount);
+  for (const item of loot.items || []) addItem(item.id, item.quantity || 1);
   if (loot.weaponId) addWeapon(loot.weaponId);
   gainXp(loot.xp);
   const biome = state.world.getBiomeAt(chest.x, chest.y);
@@ -1319,13 +1689,24 @@ function rollChestLoot(chest) {
     resources[resource] = (resources[resource] || 0) + 1 + Math.floor(rng() * 3);
   }
   const weaponId = rng() < 0.42 ? biome.lootWeapons[Math.floor(rng() * biome.lootWeapons.length)] : null;
+  const itemPool = chestItemPool(biome);
+  const items = rng() < 0.38 ? [{ id: itemPool[Math.floor(rng() * itemPool.length)], quantity: 1 }] : [];
   const xp = 10 + Math.floor(rng() * 16);
   const summary = [
     ...Object.entries(resources).map(([name, amount]) => `${amount} ${name}`),
+    ...items.map((item) => itemDef(item.id).name),
     weaponId ? WEAPONS[weaponId].name : null,
     `${xp} XP`
   ].filter(Boolean).join(", ");
-  return { resources, weaponId, xp, summary };
+  return { resources, items, weaponId, xp, summary };
+}
+
+function chestItemPool(biome) {
+  if (biome.parts?.terrainBase?.id === "crystalGround") return ["glowFruit", "lightBook", "gravityMarble", "crystalRifle"];
+  if (biome.parts?.terrainBase?.id === "mushroomSoil" || biome.parts?.terrainBase?.id === "swamp") return ["strangeMushroom", "poisonBook", "tinySlimeBuddy", "toxicSlimeBomb"];
+  if (biome.parts?.terrainBase?.id === "boneField" || biome.parts?.terrainBase?.id === "desert") return ["bonePistol", "shield", "bonePet", "deadCatTail"];
+  if (biome.parts?.terrainBase?.id === "ashland") return ["fireBook", "windJar", "invisibilityBlanket", "Fire Tooth Material"];
+  return ["apple", "orange", "helmet", "littleMan", "swiftBoots"];
 }
 
 function addResource(resource, amount) {
@@ -1360,15 +1741,24 @@ function itemDef(itemId) {
     id: itemId,
     name: itemId,
     type: "resource",
+    category: "material",
+    subcategory: "unknown",
     stackable: true,
     maxStack: 99,
     color: "#ffffff",
+    rarity: "unknown",
+    useType: "material",
+    effects: [],
+    spawnRules: [{ source: "unknown" }],
+    craftingTags: ["material"],
+    interactions: [],
     description: "Item"
   };
 }
 
 function addItem(itemId, quantity = 1) {
   const def = itemDef(itemId);
+  discoverItem(itemId);
   let remaining = quantity;
 
   if (def.stackable) {
@@ -1409,6 +1799,12 @@ function addItem(itemId, quantity = 1) {
   return remaining <= 0;
 }
 
+function discoverItem(itemId) {
+  if (!itemId || state.discoveredItems.has(itemId)) return;
+  state.discoveredItems.add(itemId);
+  if (state.codexTab === "items") renderCreatureCodex();
+}
+
 function hasInventoryItem(itemId) {
   return allSlots().some((slot) => slot?.id === itemId);
 }
@@ -1423,11 +1819,15 @@ function recountResourceInventory() {
 }
 
 function removeResource(resource, amount) {
+  return removeInventoryItem(resource, amount);
+}
+
+function removeInventoryItem(itemId, amount) {
   let remaining = amount;
   for (const slots of inventoryContainers()) {
     for (let index = 0; index < slots.length; index += 1) {
       const slot = slots[index];
-      if (!slot || slot.id !== resource) continue;
+      if (!slot || slot.id !== itemId) continue;
       const moved = Math.min(slot.quantity, remaining);
       slot.quantity -= moved;
       remaining -= moved;
@@ -1597,6 +1997,7 @@ function draw() {
   drawMarkers();
   drawDroppedItems();
   drawRemotePlayers();
+  drawFollowers();
   drawPlayer();
   drawProjectiles();
   drawEffects();
@@ -1614,6 +2015,7 @@ function drawWorld() {
     for (const hazard of chunk.hazards) drawHazard(hazard);
     for (const prop of chunk.props) drawProp(prop, chunk.biomeProfile);
     for (const resource of chunk.resources) drawResource(resource);
+    for (const structure of chunk.structures || []) drawStructure(structure);
     for (const chest of chunk.chests) drawChest(chest);
   }
   for (const chunk of chunks) {
@@ -1865,6 +2267,72 @@ function drawChest(chest) {
   ctx.restore();
 }
 
+function drawStructure(structure) {
+  ctx.save();
+  ctx.translate(structure.x, structure.y);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+  ctx.beginPath();
+  ctx.ellipse(0, 28, 46, 13, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
+  ctx.lineWidth = 3;
+  ctx.fillStyle = structure.color || "#d7a34f";
+  if (structure.type === "smallHut") {
+    ctx.fillRect(-30, -8, 60, 42);
+    ctx.beginPath();
+    ctx.moveTo(-38, -8);
+    ctx.lineTo(0, -46);
+    ctx.lineTo(38, -8);
+    ctx.closePath();
+    ctx.fill();
+  } else if (structure.type === "crystalShrine") {
+    for (let i = -2; i <= 2; i += 1) {
+      ctx.beginPath();
+      ctx.moveTo(i * 14, -48 + Math.abs(i) * 8);
+      ctx.lineTo(i * 14 - 10, 30);
+      ctx.lineTo(i * 14 + 11, 30);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+    }
+  } else if (structure.type === "boneGate") {
+    ctx.fillRect(-38, -42, 12, 76);
+    ctx.fillRect(26, -42, 12, 76);
+    ctx.fillRect(-38, -42, 76, 12);
+  } else if (structure.type === "poisonWell") {
+    ctx.beginPath();
+    ctx.ellipse(0, 0, 34, 26, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "rgba(142, 241, 94, 0.45)";
+    ctx.beginPath();
+    ctx.ellipse(0, -3, 24, 13, 0, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (structure.type === "spellTower") {
+    ctx.fillRect(-24, -54, 48, 88);
+    ctx.fillStyle = "#2d2437";
+    ctx.fillRect(-10, -36, 20, 18);
+    ctx.fillStyle = structure.color;
+    circle(0, -62, 13);
+  } else {
+    ctx.beginPath();
+    ctx.moveTo(0, -50);
+    ctx.lineTo(30, 28);
+    ctx.lineTo(-30, 28);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#2a2330";
+    circle(-9, -10, 5);
+    circle(9, -10, 5);
+  }
+  ctx.strokeRect(-42, -54, 84, 88);
+  ctx.fillStyle = "rgba(0, 0, 0, 0.72)";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(structure.name, 0, -60);
+  ctx.restore();
+}
+
 function drawMarkers() {
   for (const marker of state.markers) {
     ctx.fillStyle = "#f4e35f";
@@ -1950,12 +2418,51 @@ function drawRemotePlayers() {
   }
 }
 
+function drawFollowers() {
+  for (const follower of state.followers) {
+    const bob = Math.sin(performance.now() / 220 + follower.bob) * 3;
+    ctx.save();
+    ctx.translate(follower.x, follower.y + bob);
+    ctx.fillStyle = follower.color;
+    if (follower.type === "littleBird") {
+      ctx.beginPath();
+      ctx.ellipse(0, 0, 7, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = follower.color;
+      ctx.lineWidth = 3;
+      line(-5, 0, -14, -5);
+      line(5, 0, 14, -5);
+    } else if (follower.type === "tinySlimeBuddy") {
+      ctx.globalAlpha = 0.82;
+      ctx.beginPath();
+      ctx.ellipse(0, 2, 10, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (follower.type === "bonePet") {
+      ctx.fillStyle = "#ead7b0";
+      ctx.fillRect(-10, -4, 20, 8);
+      circle(-11, -5, 5);
+      circle(11, 5, 5);
+    } else {
+      circle(0, 0, 8);
+      ctx.fillStyle = "#2b2528";
+      circle(-3, -2, 2);
+      circle(3, -2, 2);
+    }
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.8)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 13, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
 function drawPlayer() {
   const player = state.player;
   const aim = normalize(input.mouse.worldX - player.x, input.mouse.worldY - player.y);
   ctx.save();
   ctx.translate(player.x, player.y);
-  ctx.globalAlpha = player.respawnTimer > 0 ? 0.45 : 1;
+  ctx.globalAlpha = player.respawnTimer > 0 ? 0.45 : player.buffs.invisible > 0 ? 0.38 : 1;
   ctx.fillStyle = player.hurtTimer > 0 ? "#ffaaa3" : "#69d2ff";
   circle(0, 0, player.radius);
   ctx.fillStyle = "#ffdf6e";
@@ -2038,7 +2545,7 @@ function drawLighting() {
   ctx.fillStyle = tint;
   ctx.fillRect(visible.x, visible.y, visible.w, visible.h);
   ctx.globalCompositeOperation = "lighter";
-  addLight(state.player.x, state.player.y, 190, biome.lighting?.playerLight || "rgba(255, 238, 176, 0.28)");
+  addLight(state.player.x, state.player.y, state.player.buffs.glow > 0 ? 285 : 190, biome.lighting?.playerLight || "rgba(255, 238, 176, 0.28)");
 
   for (const chunk of state.world.nearbyChunks(state.player.x, state.player.y, 2)) {
     for (const prop of chunk.props) {
@@ -2056,6 +2563,11 @@ function drawLighting() {
       else if (hazard.type === "poisonGas") addLight(hazard.x, hazard.y, hazard.radius * 2.1, "rgba(142, 241, 94, 0.14)");
       else if (hazard.type === "ice") addLight(hazard.x, hazard.y, hazard.radius * 1.8, "rgba(185, 244, 255, 0.12)");
       else addLight(hazard.x, hazard.y, hazard.radius * 2.2, "rgba(92, 239, 132, 0.13)");
+    }
+    for (const structure of chunk.structures || []) {
+      if (structure.type === "crystalShrine" || structure.type === "spellTower") addLight(structure.x, structure.y, 145, `${structure.color}44`);
+      if (structure.type === "poisonWell") addLight(structure.x, structure.y, 115, "rgba(142, 241, 94, 0.18)");
+      if (structure.type === "brokenCatStatue") addLight(structure.x, structure.y, 130, "rgba(170, 130, 190, 0.16)");
     }
   }
 
@@ -2233,6 +2745,138 @@ function renderInventorySlot(stack, index, source) {
   return button;
 }
 
+function setOctagonOpen(open) {
+  state.octagonOpen = open;
+  octagonPanel?.classList.toggle("hidden", !open);
+  if (open) renderOctagonPanel();
+}
+
+function renderOctagonPanel() {
+  if (!octagonPanel) return;
+  const slots = [...octagonPanel.querySelectorAll(".octagon-slot")];
+  state.octagonResult = findOctagonRecipe();
+  slots.forEach((button, index) => {
+    const stack = state.octagonSlots[index];
+    button.innerHTML = "";
+    button.classList.toggle("has-item", Boolean(stack));
+    button.classList.toggle("selected", state.selectedOctagonSlot === index);
+    if (stack) {
+      const def = itemDef(stack.id);
+      button.innerHTML = `
+        <span class="slot-icon" style="background:${escapeHtml(def.color || "#ffffff")}"></span>
+        <span class="slot-name">${escapeHtml(def.name)}</span>
+      `;
+    } else {
+      button.innerHTML = `<span class="slot-name">empty</span>`;
+    }
+    button.onclick = () => {
+      if (stack) state.octagonSlots[index] = null;
+      else state.selectedOctagonSlot = index;
+      renderOctagonPanel();
+    };
+  });
+
+  const recipe = state.octagonResult;
+  if (recipe) {
+    const resultDef = itemDef(recipe.result.id);
+    octagonResult.classList.add("ready");
+    octagonResult.innerHTML = `
+      <span class="slot-icon" style="background:${escapeHtml(resultDef.color || "#ffffff")}"></span>
+      <span>${escapeHtml(resultDef.name)} x${recipe.result.quantity || 1}</span>
+    `;
+  } else {
+    octagonResult.classList.remove("ready");
+    octagonResult.textContent = "No result";
+  }
+  octagonResult.onclick = craftOctagonResult;
+
+  octagonInventory.innerHTML = "";
+  allSlots().forEach((stack, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "inventory-slot";
+    if (stack) {
+      const def = itemDef(stack.id);
+      button.innerHTML = `
+        <span class="slot-icon" style="background:${escapeHtml(def.color || "#ffffff")}"></span>
+        <span class="slot-name">${escapeHtml(def.name)}</span>
+        ${stack.quantity > 1 ? `<span class="slot-qty">${stack.quantity}</span>` : ""}
+      `;
+      button.addEventListener("click", () => placeOctagonItem(stack.id));
+    } else {
+      button.disabled = true;
+    }
+    octagonInventory.append(button);
+  });
+  octagonHint.textContent = recipe
+    ? `${recipe.name} is ready. Click the center to craft.`
+    : "Click inventory items below to place them. Click octagon slots to remove them.";
+}
+
+function placeOctagonItem(itemId) {
+  const selectedOpen = state.selectedOctagonSlot != null && !state.octagonSlots[state.selectedOctagonSlot]
+    ? state.selectedOctagonSlot
+    : null;
+  const openIndex = selectedOpen ?? state.octagonSlots.findIndex((slot) => !slot);
+  if (openIndex < 0) {
+    setStatus("The Crafting Octagon is full.", 1.2);
+    return;
+  }
+  if (placedOctagonCount(itemId) >= countInventoryItem(itemId)) {
+    setStatus(`No extra ${itemDef(itemId).name} available.`, 1.2);
+    return;
+  }
+  state.octagonSlots[openIndex] = { id: itemId, quantity: 1 };
+  state.selectedOctagonSlot = null;
+  renderOctagonPanel();
+}
+
+function placedOctagonCount(itemId) {
+  return state.octagonSlots.reduce((total, slot) => total + (slot?.id === itemId ? slot.quantity || 1 : 0), 0);
+}
+
+function countInventoryItem(itemId) {
+  return allSlots().reduce((total, slot) => total + (slot?.id === itemId ? slot.quantity : 0), 0);
+}
+
+function findOctagonRecipe() {
+  const counts = {};
+  let total = 0;
+  for (const slot of state.octagonSlots) {
+    if (!slot) continue;
+    counts[slot.id] = (counts[slot.id] || 0) + (slot.quantity || 1);
+    total += slot.quantity || 1;
+  }
+  if (!total) return null;
+  return OCTAGON_RECIPES.find((recipe) => {
+    const neededTotal = recipe.inputs.reduce((sum, input) => sum + (input.quantity || 1), 0);
+    if (neededTotal !== total) return false;
+    return recipe.inputs.every((input) => (counts[input.id] || 0) >= (input.quantity || 1));
+  }) || null;
+}
+
+function craftOctagonResult() {
+  const recipe = state.octagonResult || findOctagonRecipe();
+  if (!recipe) {
+    setStatus("The octagon has no stable result.", 1.2);
+    return;
+  }
+  for (const input of recipe.inputs) {
+    if (countInventoryItem(input.id) < (input.quantity || 1)) {
+      setStatus("Missing octagon ingredients.", 1.2);
+      renderOctagonPanel();
+      return;
+    }
+  }
+  for (const input of recipe.inputs) removeInventoryItem(input.id, input.quantity || 1);
+  state.octagonSlots = createSlots(8);
+  state.selectedOctagonSlot = null;
+  addItem(recipe.result.id, recipe.result.quantity || 1);
+  setStatus(`Crafted ${itemDef(recipe.result.id).name}.`);
+  renderOctagonPanel();
+  renderHotbar();
+}
+
 function renderHearts(hp, maxHp) {
   const filled = Math.ceil(clamp(hp / Math.max(1, maxHp), 0, 1) * 10);
   return Array.from({ length: 10 }, (_, index) => `<span>${index < filled ? "♥" : "♡"}</span>`).join("");
@@ -2351,6 +2995,40 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+function setupDraggablePanels() {
+  for (const panel of document.querySelectorAll(".panel")) {
+    const handle = panel.querySelector(".drag-handle");
+    if (!handle) continue;
+    handle.addEventListener("mousedown", (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const shellRect = shell.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      const offsetX = event.clientX - panelRect.left;
+      const offsetY = event.clientY - panelRect.top;
+      panel.style.transform = "none";
+      panel.style.left = `${panelRect.left - shellRect.left}px`;
+      panel.style.top = `${panelRect.top - shellRect.top}px`;
+      panel.style.right = "auto";
+      const onMove = (moveEvent) => {
+        const width = panel.offsetWidth;
+        const height = panel.offsetHeight;
+        const x = clamp(moveEvent.clientX - shellRect.left - offsetX, 4, Math.max(4, shellRect.width - width - 4));
+        const y = clamp(moveEvent.clientY - shellRect.top - offsetY, 4, Math.max(4, shellRect.height - Math.min(height, shellRect.height - 8) - 4));
+        panel.style.left = `${x}px`;
+        panel.style.top = `${y}px`;
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    });
+  }
+}
+
 window.addEventListener("resize", resizeCanvas);
 window.addEventListener("keydown", (event) => {
   if (event.code === "F3") {
@@ -2368,8 +3046,16 @@ window.addEventListener("keydown", (event) => {
       setCodexOpen(false);
       return;
     }
+    if (state.octagonOpen) {
+      setOctagonOpen(false);
+      return;
+    }
     if (state.inventoryOpen) {
       setInventoryOpen(false);
+      return;
+    }
+    if (!craftingPanel.classList.contains("hidden")) {
+      craftingPanel.classList.add("hidden");
       return;
     }
     returnToMenu();
@@ -2383,6 +3069,10 @@ window.addEventListener("keydown", (event) => {
   }
   if (event.code === "KeyQ") {
     setCodexOpen(!state.codexOpen);
+    return;
+  }
+  if (event.code === "KeyF") {
+    setOctagonOpen(!state.octagonOpen);
     return;
   }
   if (event.code === "Space") input.attackQueued = true;
@@ -2404,9 +3094,7 @@ canvas.addEventListener("mousemove", (event) => {
 });
 canvas.addEventListener("mousedown", () => {
   if (!state.started) return;
-  if (state.inventoryOpen || state.codexOpen || !creatureInfoPanel.classList.contains("hidden")) return;
-  input.mouse.down = true;
-  input.attackQueued = true;
+  if (state.inventoryOpen || state.codexOpen || state.octagonOpen || !creatureInfoPanel.classList.contains("hidden")) return;
   input.pickupQueued = true;
 });
 window.addEventListener("mouseup", () => {
@@ -2431,9 +3119,13 @@ document.getElementById("joinCodeButton").addEventListener("click", joinCode);
 document.getElementById("leaveButton").addEventListener("click", leaveMultiplayer);
 closeCreatureInfoButton.addEventListener("click", closeCreatureInfo);
 closeCodexButton.addEventListener("click", () => setCodexOpen(false));
+codexCreaturesTab.addEventListener("click", () => setCodexTab("creatures"));
+codexItemsTab.addEventListener("click", () => setCodexTab("items"));
+closeOctagonButton.addEventListener("click", () => setOctagonOpen(false));
 nameInput.addEventListener("change", savePlayerName);
 
 resizeCanvas();
+setupDraggablePanels();
 renderRecipes();
 setServerPrivacy("public");
 renderLobbyList();
